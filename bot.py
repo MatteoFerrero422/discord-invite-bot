@@ -4,15 +4,44 @@ from discord.ui import View, Button
 import aiosqlite
 from datetime import datetime, timedelta, timezone
 import asyncio
+import os
+from flask import Flask
+from threading import Thread
+import logging
+
+# ================== FLASK ДЛЯ KEEP-ALIVE ==================
+app = Flask('')
+
+# Отключаем логи Flask
+logging.getLogger('werkzeug').setLevel(logging.ERROR)
+
+@app.route('/')
+def home():
+    return "✅ Discord бот активен и работает 24/7!"
+
+def run():
+    app.run(host='0.0.0.0', port=8080)
+
+def keep_alive():
+    server = Thread(target=run)
+    server.daemon = True
+    server.start()
+    print("🌐 Веб-сервер для keep-alive запущен на порту 8080")
 
 # ================== КОНФИГУРАЦИЯ ==================
-TOKEN = "MTQ4Njk3Nzg0MTIxOTM3MTE0MA.GBLnCY.LotzaxwFgnIHAzFq9mkm3T8W7SPkHe79Uotgl4"
+# Токен берется из переменной окружения (безопасно!)
+TOKEN = os.getenv("TOKEN")
 GUILD_ID = 1176162885811060756
 LOG_CHANNEL_ID = 1455165169075490963
 TICKET_CATEGORY_ID = 1486980315825049640
 BUYER_ROLE = "Покупатель"
 REGULAR_ROLE = "Постоянный покупатель"
 MIN_ACCOUNT_AGE_DAYS = 3
+
+# Проверка наличия токена
+if not TOKEN:
+    print("❌ ОШИБКА: Токен не найден! Установите переменную окружения TOKEN")
+    exit(1)
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -704,6 +733,10 @@ async def reset_user(interaction: discord.Interaction, user: discord.Member):
 # ================== ЗАПУСК ==================
 if __name__ == "__main__":
     try:
+        # Запускаем keep-alive сервер
+        keep_alive()
+        
+        # Запускаем бота
         bot.run(TOKEN)
     except discord.LoginFailure:
         print("❌ Ошибка: Неверный токен бота!")
