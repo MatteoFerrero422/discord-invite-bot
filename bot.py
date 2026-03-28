@@ -28,13 +28,15 @@ def ping():
     return "pong", 200
 
 def run():
-    app.run(host='0.0.0.0', port=8080)
+    # Используем порт, который даёт Render (или 10000 по умолчанию)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
 
 def keep_alive():
     server = Thread(target=run)
     server.daemon = True
     server.start()
-    print("🌐 Веб-сервер для keep-alive запущен на порту 8080")
+    print(f"🌐 Веб-сервер для keep-alive запущен на порту {os.environ.get('PORT', 10000)}")
 
 # ================== КОНФИГУРАЦИЯ ==================
 # Токен берется из переменной окружения (безопасно!)
