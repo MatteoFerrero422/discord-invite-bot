@@ -5,7 +5,7 @@ import aiosqlite
 from datetime import datetime, timedelta, timezone
 import asyncio
 import os
-from flask import Flask
+from flask import Flask, jsonify
 from threading import Thread
 import logging
 
@@ -17,7 +17,15 @@ logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 @app.route('/')
 def home():
-    return "✅ Discord бот активен и работает 24/7!"
+    return "OK", 200
+
+@app.route('/health')
+def health():
+    return jsonify({"status": "alive", "bot": "running"}), 200
+
+@app.route('/ping')
+def ping():
+    return "pong", 200
 
 def run():
     app.run(host='0.0.0.0', port=8080)
