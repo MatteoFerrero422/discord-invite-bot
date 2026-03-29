@@ -12,8 +12,6 @@ import random
 
 # ================== FLASK ДЛЯ KEEP-ALIVE ==================
 app = Flask('')
-
-# Отключаем логи Flask
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 @app.route('/')
@@ -49,7 +47,7 @@ REGULAR_ROLE = "Постоянный покупатель"
 MIN_ACCOUNT_AGE_DAYS = 3
 
 if not TOKEN:
-    print("❌ ОШИБКА: Токен не найден! Установите переменную окружения TOKEN")
+    print("❌ ОШИБКА: Токен не найден!")
     exit(1)
 
 intents = discord.Intents.all()
@@ -116,7 +114,6 @@ async def get_next_order_number():
             order_counter = 496
     return order_counter
 
-# ================== МИГРАЦИЯ ==================
 async def migrate_db():
     async with aiosqlite.connect("db.sqlite3") as db:
         cursor = await db.execute("PRAGMA table_info(joins)")
@@ -124,7 +121,6 @@ async def migrate_db():
         if "join_date" not in columns:
             try:
                 await db.execute("ALTER TABLE joins ADD COLUMN join_date TEXT")
-                print("✅ Добавлена колонка join_date")
             except:
                 pass
         
@@ -133,7 +129,6 @@ async def migrate_db():
         if "total_invites" not in columns:
             try:
                 await db.execute("ALTER TABLE users ADD COLUMN total_invites INTEGER DEFAULT 0")
-                print("✅ Добавлена колонка total_invites")
             except:
                 pass
         await db.commit()
@@ -148,10 +143,11 @@ async def on_ready():
         guild = discord.Object(id=GUILD_ID)
         bot.tree.copy_global_to(guild=guild)
         synced = await bot.tree.sync(guild=guild)
-        print(f"✅ Синхронизировано {len(synced)} команд: {', '.join([cmd.name for cmd in synced])}")
+        print(f"✅ Синхронизировано {len(synced)} команд")
     except Exception as e:
         print(f"❌ Ошибка синхронизации: {e}")
     
+    # Загружаем все инвайты в кэш
     for guild in bot.guilds:
         try:
             invites = await guild.invites()
@@ -161,6 +157,7 @@ async def on_ready():
                     'uses': invite.uses,
                     'inviter': invite.inviter.id if invite.inviter else None
                 }
+            print(f"📊 Загружено {len(invites)} инвайтов")
         except Exception as e:
             print(f"❌ Ошибка загрузки инвайтов: {e}")
 
@@ -198,111 +195,12 @@ async def help_command(interaction: discord.Interaction):
                 "`/takeinvites <user> <amount>` - Забрать инвайты\n"
                 "`/reset_user <user>` - Сбросить статистику\n"
                 "`/sync` - Синхронизировать команды\n"
-                "`/successful <order_number>` - Отметить заказ\n"
-                "`/checkinvites` - Список всех инвайтов\n"
-                "`/fixinvites` - Обновить кэш инвайтов"
+                "`/successful <order_number>` - Отметить заказ выполненным"
             ),
             inline=False
         )
     
-    embed.set_footer(text="Бот для помощи с заданиями Discord")
     await interaction.response.send_message(embed=embed, ephemeral=True)
-
-# ================== КОМАНДА /CHECKINVITES ==================
-class InvitePaginator(View):
-    def __init__(self, pages, author_id):
-        super().__init__(timeout=60)
-        self.pages = pages
-        self.current_page = 0
-        self.author_id = author_id
-    
-    async def update_message(self, interaction):
-        await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
-    
-    @discord.ui.button(label="◀ Назад", style=discord.ButtonStyle.blurple)
-    async def previous(self, interaction: discord.Interaction, button: Button):
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("❌ Это не ваша команда!", ephemeral=True)
-            return
-        self.current_page = (self.current_page - 1) % len(self.pages)
-        await self.update_message(interaction)
-    
-    @discord.ui.button(label="Вперед ▶", style=discord.ButtonStyle.blurple)
-    async def next(self, interaction: discord.Interaction, button: Button):
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("❌ Это не ваша команда!", ephemeral=True)
-            return
-        self.current_page = (self.current_page + 1) % len(self.pages)
-        await self.update_message(interaction)
-    
-    @discord.ui.button(label="❌ Закрыть", style=discord.ButtonStyle.red)
-    async def close(self, interaction: discord.Interaction, button: Button):
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("❌ Это не ваша команда!", ephemeral=True)
-            return
-        await interaction.message.delete()
-        self.stop()
-
-@bot.tree.command(name="checkinvites", description="Проверить все инвайты на сервере (только для админов)")
-async def checkinvites(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
-        return
-    
-    await interaction.response.defer(ephemeral=True)
-    
-    guild = interaction.guild
-    invites = await guild.invites()
-    
-    if not invites:
-        await interaction.followup.send("📊 На сервере нет созданных инвайтов!")
-        return
-    
-    items_per_page = 20
-    pages = []
-    
-    for i in range(0, len(invites), items_per_page):
-        page_invites = invites[i:i + items_per_page]
-        embed = discord.Embed(
-            title=f"📊 Список инвайтов (страница {len(pages) + 1})",
-            color=discord.Color.blue()
-        )
-        
-        for invite in page_invites:
-            inviter_name = invite.inviter.name if invite.inviter else "Неизвестно"
-            embed.add_field(
-                name=f"🔗 {invite.code}",
-                value=f"Создал: {inviter_name}\nИспользований: {invite.uses}\nКанал: {invite.channel.mention}",
-                inline=False
-            )
-        
-        embed.set_footer(text=f"Всего инвайтов: {len(invites)}")
-        pages.append(embed)
-    
-    view = InvitePaginator(pages, interaction.user.id)
-    await interaction.followup.send(embed=pages[0], view=view)
-
-# ================== КОМАНДА /FIXINVITES ==================
-@bot.tree.command(name="fixinvites", description="Принудительно обновить кэш инвайтов (только для админов)")
-async def fixinvites(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
-        return
-    
-    await interaction.response.defer(ephemeral=True)
-    
-    guild = interaction.guild
-    try:
-        invites = await guild.invites()
-        invites_cache[guild.id] = {}
-        for invite in invites:
-            invites_cache[guild.id][invite.code] = {
-                'uses': invite.uses,
-                'inviter': invite.inviter.id if invite.inviter else None
-            }
-        await interaction.followup.send(f"✅ Кэш инвайтов обновлён! Загружено {len(invites)} инвайтов.")
-    except Exception as e:
-        await interaction.followup.send(f"❌ Ошибка: {e}")
 
 # ================== КОМАНДА /SUCCESSFUL ==================
 @bot.tree.command(name="successful", description="Отметить заказ как выполненный (только для админов)")
@@ -323,11 +221,7 @@ async def successful(interaction: discord.Interaction, order_number: int):
             return
         
         user_id, item, message_id = order
-        
-        await db.execute(
-            "UPDATE orders SET status='Выполнено' WHERE order_number=?",
-            (order_number,)
-        )
+        await db.execute("UPDATE orders SET status='Выполнено' WHERE order_number=?", (order_number,))
         await db.commit()
     
     orders_channel = bot.get_channel(ORDERS_CHANNEL_ID)
@@ -351,14 +245,10 @@ async def successful(interaction: discord.Interaction, order_number: int):
         except:
             pass
     
-    embed = discord.Embed(
-        title="✅ Заказ выполнен!",
-        description=f"Заказ #{order_number} отмечен как выполненный",
-        color=discord.Color.green()
-    )
+    embed = discord.Embed(title="✅ Заказ выполнен!", description=f"Заказ #{order_number} отмечен как выполненный", color=discord.Color.green())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# ================== КОМАНДА /INFO (ИСПРАВЛЕНА - БЕЗ КНОПОК) ==================
+# ================== КОМАНДА /INFO ==================
 @bot.tree.command(name="info", description="Информация о сервисе помощи с заданиями")
 async def info(interaction: discord.Interaction):
     embed = discord.Embed(
@@ -369,47 +259,37 @@ async def info(interaction: discord.Interaction):
     
     embed.add_field(
         name="🤝 О нас",
-        value="Мы занимаемся помощью участникам, у которых нет возможности выполнять задания Discord (например: нет ПК, слабое устройство и т.д.), но которые хотят получать награды!",
+        value="Мы помогаем участникам выполнять задания Discord!",
         inline=False
     )
     
     embed.add_field(
         name="⭐ Что мы даем?",
-        value="• Украшения профиля\n• Orbs (валюта Discord)\n• Награды за выполнение заданий\n\nНаша команда выполнит задания за вас быстро и безопасно.",
+        value="• Украшения профиля\n• Orbs (валюта Discord)\n• Награды за выполнение заданий",
         inline=False
     )
     
     embed.add_field(
         name="💰 Прайс-лист",
         value=(
-            "🟠 Выполнить 1 задание (700 orbs 💎) - **3 инвайта**\n"
-            "🔵 Выполнить задание с украшением - **3 инвайта**\n"
-            "🩷 Выполнить 2 задания (1400 orbs 💎) - **5 инвайтов**\n"
-            "🟡 Выполнить все доступные задания на аккаунте - **10 инвайтов**\n"
-            "🎁 Nitro Full на 3 дня - **5 инвайтов**\n"
-            "🟠 Выполнить 1 задание (200 orbs 💎) - **2 инвайта**"
+            "🟠 1 задание (700 Orbs) - **3 инвайта**\n"
+            "🔵 Задание с украшением - **3 инвайта**\n"
+            "🩷 2 задания (1400 Orbs) - **5 инвайтов**\n"
+            "🟡 Все задания - **10 инвайтов**\n"
+            "🎁 Nitro Full (3 дня) - **5 инвайтов**\n"
+            "🟠 1 задание (200 Orbs) - **2 инвайта**"
         ),
         inline=False
     )
     
     embed.add_field(
         name="⚠️ Гарантии",
-        value=(
-            "• Безопасность аккаунта\n"
-            "• Быстрое выполнение\n"
-            "• Поддержка 24/7\n"
-            "• Честная работа без обмана"
-        ),
+        value="• Безопасность\n• Быстрое выполнение\n• Поддержка 24/7",
         inline=False
     )
     
-    embed.add_field(
-        name="📞 Как заказать?",
-        value="Чтобы заказать выполнение, используйте команду `/shop`!",
-        inline=False
-    )
-    
-    embed.set_footer(text="Бот для помощи с заданиями Discord | Ваши инвайты = ваши награды")
+    embed.add_field(name="📞 Как заказать?", value="Используйте команду `/shop`!", inline=False)
+    embed.set_footer(text="Ваши инвайты = ваши награды")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ================== КОМАНДА /GIVEINVITES ==================
@@ -420,7 +300,7 @@ async def giveinvites(interaction: discord.Interaction, user: discord.Member, am
         return
     
     if amount <= 0:
-        await interaction.response.send_message("❌ Количество инвайтов должно быть положительным числом!", ephemeral=True)
+        await interaction.response.send_message("❌ Количество должно быть положительным!", ephemeral=True)
         return
     
     async with aiosqlite.connect("db.sqlite3") as db:
@@ -433,17 +313,12 @@ async def giveinvites(interaction: discord.Interaction, user: discord.Member, am
         """, (user.id, amount, amount, amount, amount))
         await db.commit()
     
-    embed = discord.Embed(
-        title="✅ Инвайты выданы!",
-        description=f"Пользователю {user.mention} выдано **{amount}** инвайтов!",
-        color=discord.Color.green()
-    )
-    embed.set_footer(text=f"Выдал: {interaction.user.name}")
+    embed = discord.Embed(title="✅ Инвайты выданы!", description=f"{user.mention} выдано **{amount}** инвайтов!", color=discord.Color.green())
     await interaction.response.send_message(embed=embed, ephemeral=True)
     
     log_channel = bot.get_channel(LOG_CHANNEL_ID)
     if log_channel:
-        await log_channel.send(f"📊 **{interaction.user.name}** выдал {amount} инвайтов пользователю {user.mention}")
+        await log_channel.send(f"📊 {interaction.user.name} выдал {amount} инвайтов {user.mention}")
 
 # ================== КОМАНДА /TAKEINVITES ==================
 @bot.tree.command(name="takeinvites", description="Забрать инвайты у пользователя (только для админов)")
@@ -453,14 +328,11 @@ async def takeinvites(interaction: discord.Interaction, user: discord.Member, am
         return
     
     if amount <= 0:
-        await interaction.response.send_message("❌ Количество инвайтов должно быть положительным числом!", ephemeral=True)
+        await interaction.response.send_message("❌ Количество должно быть положительным!", ephemeral=True)
         return
     
     async with aiosqlite.connect("db.sqlite3") as db:
-        cursor = await db.execute(
-            "SELECT invited, left, spent FROM users WHERE user_id=?",
-            (user.id,)
-        )
+        cursor = await db.execute("SELECT invited, left, spent FROM users WHERE user_id=?", (user.id,))
         data = await cursor.fetchone()
         
         if data:
@@ -468,31 +340,20 @@ async def takeinvites(interaction: discord.Interaction, user: discord.Member, am
             current_valid = invited - left - spent
             
             if current_valid < amount:
-                await interaction.response.send_message(
-                    f"❌ Нельзя забрать {amount} инвайтов! У пользователя {user.mention} всего {current_valid} доступных инвайтов!",
-                    ephemeral=True
-                )
+                await interaction.response.send_message(f"❌ У {user.mention} всего {current_valid} инвайтов!", ephemeral=True)
                 return
             
-            await db.execute("""
-            UPDATE users SET spent = spent + ? WHERE user_id=?
-            """, (amount, user.id))
+            await db.execute("UPDATE users SET spent = spent + ? WHERE user_id=?", (amount, user.id))
             await db.commit()
             
-            embed = discord.Embed(
-                title="📤 Инвайты забраны!",
-                description=f"У пользователя {user.mention} забрано **{amount}** инвайтов!",
-                color=discord.Color.orange()
-            )
-            embed.add_field(name="Осталось инвайтов", value=f"**{current_valid - amount}**", inline=False)
-            embed.set_footer(text=f"Забрал: {interaction.user.name}")
+            embed = discord.Embed(title="📤 Инвайты забраны!", description=f"У {user.mention} забрано **{amount}** инвайтов!\nОсталось: {current_valid - amount}", color=discord.Color.orange())
             await interaction.response.send_message(embed=embed, ephemeral=True)
             
             log_channel = bot.get_channel(LOG_CHANNEL_ID)
             if log_channel:
-                await log_channel.send(f"📊 **{interaction.user.name}** забрал {amount} инвайтов у пользователя {user.mention}")
+                await log_channel.send(f"📊 {interaction.user.name} забрал {amount} инвайтов у {user.mention}")
         else:
-            await interaction.response.send_message(f"❌ У пользователя {user.mention} нет инвайтов!", ephemeral=True)
+            await interaction.response.send_message(f"❌ У {user.mention} нет инвайтов!", ephemeral=True)
 
 # ================== КОМАНДА /SYNC ==================
 @bot.tree.command(name="sync", description="Синхронизировать команды (только для админов)")
@@ -507,7 +368,7 @@ async def sync_commands(interaction: discord.Interaction):
         guild = discord.Object(id=GUILD_ID)
         bot.tree.copy_global_to(guild=guild)
         synced = await bot.tree.sync(guild=guild)
-        await interaction.followup.send(f"✅ Синхронизировано {len(synced)} команд: {', '.join([cmd.name for cmd in synced])}")
+        await interaction.followup.send(f"✅ Синхронизировано {len(synced)} команд")
     except Exception as e:
         await interaction.followup.send(f"❌ Ошибка: {e}")
 
@@ -516,7 +377,7 @@ def is_fake(member):
     age = datetime.now(timezone.utc) - member.created_at
     return age < timedelta(days=MIN_ACCOUNT_AGE_DAYS)
 
-# ================== ВХОД ==================
+# ================== ВХОД (ПЕРЕПИСАН) ==================
 @bot.event
 async def on_member_join(member):
     guild = member.guild
@@ -524,30 +385,32 @@ async def on_member_join(member):
     if guild.id not in invites_cache:
         invites_cache[guild.id] = {}
     
+    # Получаем текущие инвайты
     invites = await guild.invites()
     old = invites_cache[guild.id]
     
     inviter = None
     used_invite = None
     
+    # Ищем использованный инвайт
     for invite in invites:
-        old_data = old.get(invite.code)
-        if isinstance(old_data, dict):
-            old_uses = old_data.get('uses', 0)
-        else:
-            old_uses = old_data if old_data else 0
+        old_uses = 0
+        if invite.code in old:
+            if isinstance(old[invite.code], dict):
+                old_uses = old[invite.code].get('uses', 0)
+            else:
+                old_uses = old[invite.code]
         
         if invite.uses > old_uses:
             inviter = invite.inviter
             used_invite = invite.code
+            print(f"🔍 Найден инвайт: {invite.code} (было {old_uses}, стало {invite.uses})")
             break
     
+    # Обновляем кэш
     new_cache = {}
     for invite in invites:
-        new_cache[invite.code] = {
-            'uses': invite.uses,
-            'inviter': invite.inviter.id if invite.inviter else None
-        }
+        new_cache[invite.code] = {'uses': invite.uses, 'inviter': invite.inviter.id if invite.inviter else None}
     invites_cache[guild.id] = new_cache
     
     channel = bot.get_channel(LOG_CHANNEL_ID)
@@ -560,8 +423,10 @@ async def on_member_join(member):
     
     if inviter:
         async with aiosqlite.connect("db.sqlite3") as db:
+            # Проверяем, не заходил ли уже этот пользователь
             cursor = await db.execute("SELECT inviter_id FROM joins WHERE user_id=?", (member.id,))
             if not await cursor.fetchone():
+                # Увеличиваем счетчик пригласившего
                 await db.execute("""
                 INSERT INTO users (user_id, invited, total_invites)
                 VALUES (?, 1, 1)
@@ -569,11 +434,20 @@ async def on_member_join(member):
                     invited = invited + 1,
                     total_invites = total_invites + 1
                 """, (inviter.id,))
+                
+                # Записываем факт приглашения
                 await db.execute("INSERT INTO joins (user_id, inviter_id, join_date) VALUES (?, ?, datetime('now'))", (member.id, inviter.id))
                 await db.execute("INSERT INTO invite_history (user_id, inviter_id, invite_code, date) VALUES (?, ?, ?, datetime('now'))", (member.id, inviter.id, used_invite))
                 await db.commit()
-        
-        await channel.send(f"👤 {member.mention} зашел\n📨 Пригласил: {inviter.mention}\n📊 Всего приглашений: {await get_invites_count(inviter.id)}")
+                
+                # Получаем актуальное количество
+                cursor = await db.execute("SELECT invited, left, spent FROM users WHERE user_id=?", (inviter.id,))
+                inv_data = await cursor.fetchone()
+                if inv_data:
+                    total_valid = inv_data[0] - inv_data[1] - inv_data[2]
+                    await channel.send(f"👤 {member.mention} зашел\n📨 Пригласил: {inviter.mention}\n📊 Теперь у {inviter.name} {total_valid} инвайтов")
+            else:
+                await channel.send(f"👤 {member.mention} зашел\n📨 Пригласил: {inviter.mention}\n⚠️ Но этот пользователь уже заходил ранее - инвайт не засчитан")
     else:
         await channel.send(f"👤 {member.mention} зашел\n📨 Пригласил: Неизвестно")
 
@@ -592,7 +466,7 @@ async def on_member_remove(member):
             if channel:
                 try:
                     inviter = await bot.fetch_user(inviter_id)
-                    await channel.send(f"👋 {member.mention} покинул сервер\n📊 У пригласившего ({inviter.name}) засчитан выход")
+                    await channel.send(f"👋 {member.mention} покинул сервер\n📊 У {inviter.name} засчитан выход")
                 except:
                     await channel.send(f"👋 {member.mention} покинул сервер\n📊 У пригласившего (ID: {inviter_id}) засчитан выход")
 
@@ -605,7 +479,7 @@ async def get_invites_count(user_id):
         return data[0] - data[1] - data[2]
     return 0
 
-# ================== /INVITES (ИСПРАВЛЕНА) ==================
+# ================== /INVITES ==================
 @bot.tree.command(name="invites", description="Показать статистику ваших приглашений")
 async def invites(interaction: discord.Interaction):
     async with aiosqlite.connect("db.sqlite3") as db:
@@ -632,8 +506,6 @@ async def invites(interaction: discord.Interaction):
     if purchases:
         history = "\n".join([f"• {item} ({date[:10]})" for item, date in purchases])
         embed.add_field(name="🛒 Последние покупки", value=history, inline=False)
-    else:
-        embed.add_field(name="🛒 Покупки", value="Нет покупок", inline=False)
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -781,43 +653,14 @@ async def shop(interaction: discord.Interaction):
         color=discord.Color.purple()
     )
     
-    embed.add_field(
-        name="🟠 1 задание (700 Orbs)",
-        value="**Цена:** 3 инвайта\nВыполнение одного задания Discord за 💎 700 Orbs",
-        inline=False
-    )
+    embed.add_field(name="🟠 1 задание (700 Orbs)", value="**Цена:** 3 инвайта", inline=False)
+    embed.add_field(name="🔵 Задание с украшением", value="**Цена:** 3 инвайта", inline=False)
+    embed.add_field(name="🩷 2 задания (1400 Orbs)", value="**Цена:** 5 инвайтов", inline=False)
+    embed.add_field(name="🟡 Все задания", value="**Цена:** 10 инвайтов", inline=False)
+    embed.add_field(name="🎁 Nitro Full (3 дня)", value="**Цена:** 5 инвайтов", inline=False)
+    embed.add_field(name="🟠 1 задание (200 Orbs)", value="**Цена:** 2 инвайта", inline=False)
     
-    embed.add_field(
-        name="🔵 Задание с украшением",
-        value="**Цена:** 3 инвайта\nВыполнение задания с получением украшения профиля",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="🩷 2 задания (1400 Orbs)",
-        value="**Цена:** 5 инвайтов\nВыполнение двух заданий Discord за 💎 1400 Orbs",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="🟡 Все задания",
-        value="**Цена:** 10 инвайтов\nВыполнение всех доступных заданий на аккаунте",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="🎁 Nitro Full (3 дня)",
-        value="**Цена:** 5 инвайтов\nDiscord Nitro на 3 дня",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="🟠 1 задание (200 Orbs)",
-        value="**Цена:** 2 инвайта\nВыполнение одного задания Discord за 💎 200 Orbs",
-        inline=False
-    )
-    
-    embed.set_footer(text="💰 Оплата производится вашими приглашениями | /invites - проверить баланс")
+    embed.set_footer(text="💰 Оплата вашими приглашениями | /invites - проверить баланс")
     
     view = Shop()
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
