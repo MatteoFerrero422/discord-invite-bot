@@ -208,7 +208,7 @@ async def help_command(interaction: discord.Interaction):
     embed.set_footer(text="Бот для помощи с заданиями Discord")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# ================== КОМАНДА /CHECKINVITES (С ПАГИНАЦИЕЙ) ==================
+# ================== КОМАНДА /CHECKINVITES ==================
 class InvitePaginator(View):
     def __init__(self, pages, author_id):
         super().__init__(timeout=60)
@@ -358,7 +358,7 @@ async def successful(interaction: discord.Interaction, order_number: int):
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# ================== КОМАНДА /INFO ==================
+# ================== КОМАНДА /INFO (ИСПРАВЛЕНА - БЕЗ КНОПОК) ==================
 @bot.tree.command(name="info", description="Информация о сервисе помощи с заданиями")
 async def info(interaction: discord.Interaction):
     embed = discord.Embed(
@@ -369,19 +369,13 @@ async def info(interaction: discord.Interaction):
     
     embed.add_field(
         name="🤝 О нас",
-        value="Мы занимаемся помощью участникам, у которых нет возможности выполнять задания Discord (например: нет ПК, слабое устройство и т.д.), но которые хотят получать:\n🦋",
+        value="Мы занимаемся помощью участникам, у которых нет возможности выполнять задания Discord (например: нет ПК, слабое устройство и т.д.), но которые хотят получать награды!",
         inline=False
     )
     
     embed.add_field(
         name="⭐ Что мы даем?",
         value="• Украшения профиля\n• Orbs (валюта Discord)\n• Награды за выполнение заданий\n\nНаша команда выполнит задания за вас быстро и безопасно.",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="🔍 Что мы делаем?",
-        value="Мы выполняем за вас Discord-задания, за которые вы получаете: ⚠️\n• Orbs ✨\n• Украшения профиля ✨\n• Эксклюзивные награды ✨\n\nВсё что требуется от вас - оплата в виде приглашений на сервер.",
         inline=False
     )
     
@@ -411,70 +405,12 @@ async def info(interaction: discord.Interaction):
     
     embed.add_field(
         name="📞 Как заказать?",
-        value="Чтобы заказать выполнение, используйте команду `/shop` или нажмите на кнопку ниже!",
+        value="Чтобы заказать выполнение, используйте команду `/shop`!",
         inline=False
     )
     
     embed.set_footer(text="Бот для помощи с заданиями Discord | Ваши инвайты = ваши награды")
-    
-    view = ShopButtonView()
-    await interaction.response.send_message(embed=embed, view=view)
-
-class ShopButtonView(View):
-    def __init__(self):
-        super().__init__(timeout=None)
-    
-    @discord.ui.button(label="🛒 Открыть магазин", style=discord.ButtonStyle.green, emoji="🛒")
-    async def open_shop(self, interaction: discord.Interaction, button: Button):
-        await shop_command(interaction)
-
-async def shop_command(interaction):
-    embed = discord.Embed(
-        title="🛒 Магазин услуг",
-        description="Выберите услугу для заказа",
-        color=discord.Color.purple()
-    )
-    
-    embed.add_field(
-        name="🟠 1 задание (700 Orbs)",
-        value="**Цена:** 3 инвайта\nВыполнение одного задания Discord за 💎 700 Orbs",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="🔵 Задание с украшением",
-        value="**Цена:** 3 инвайта\nВыполнение задания с получением украшения профиля",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="🩷 2 задания (1400 Orbs)",
-        value="**Цена:** 5 инвайтов\nВыполнение двух заданий Discord за 💎 1400 Orbs",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="🟡 Все задания",
-        value="**Цена:** 10 инвайтов\nВыполнение всех доступных заданий на аккаунте",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="🎁 Nitro Full (3 дня)",
-        value="**Цена:** 5 инвайтов\nDiscord Nitro на 3 дня",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="🟠 1 задание (200 Orbs)",
-        value="**Цена:** 2 инвайта\nВыполнение одного задания Discord за 💎 200 Orbs",
-        inline=False
-    )
-    
-    embed.set_footer(text="💰 Оплата производится вашими приглашениями | /invites - проверить баланс")
-    
-    view = Shop()
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ================== КОМАНДА /GIVEINVITES ==================
 @bot.tree.command(name="giveinvites", description="Выдать инвайты пользователю (только для админов)")
@@ -669,22 +605,22 @@ async def get_invites_count(user_id):
         return data[0] - data[1] - data[2]
     return 0
 
-# ================== /INVITES ==================
+# ================== /INVITES (ИСПРАВЛЕНА) ==================
 @bot.tree.command(name="invites", description="Показать статистику ваших приглашений")
 async def invites(interaction: discord.Interaction):
     async with aiosqlite.connect("db.sqlite3") as db:
         cursor = await db.execute("SELECT invited, left, spent, total_invites FROM users WHERE user_id=?", (interaction.user.id,))
         data = await cursor.fetchone()
-    
-    if data:
-        invited, left, spent, total_invites = data
-        valid = invited - left - spent
-    else:
-        invited = left = spent = total_invites = 0
-        valid = 0
-    
-    cursor = await db.execute("SELECT item, date FROM purchases WHERE user_id=? ORDER BY date DESC LIMIT 10", (interaction.user.id,))
-    purchases = await cursor.fetchall()
+        
+        if data:
+            invited, left, spent, total_invites = data
+            valid = invited - left - spent
+        else:
+            invited = left = spent = total_invites = 0
+            valid = 0
+        
+        cursor = await db.execute("SELECT item, date FROM purchases WHERE user_id=? ORDER BY date DESC LIMIT 10", (interaction.user.id,))
+        purchases = await cursor.fetchall()
     
     embed = discord.Embed(title=f"📊 Статистика {interaction.user.name}", color=discord.Color.blue())
     embed.add_field(name="✅ Доступно", value=f"**{valid}**", inline=True)
@@ -839,7 +775,52 @@ class Shop(View):
 # ================== /SHOP ==================
 @bot.tree.command(name="shop", description="Открыть магазин")
 async def shop(interaction: discord.Interaction):
-    await shop_command(interaction)
+    embed = discord.Embed(
+        title="🛒 Магазин услуг",
+        description="Выберите услугу для заказа",
+        color=discord.Color.purple()
+    )
+    
+    embed.add_field(
+        name="🟠 1 задание (700 Orbs)",
+        value="**Цена:** 3 инвайта\nВыполнение одного задания Discord за 💎 700 Orbs",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="🔵 Задание с украшением",
+        value="**Цена:** 3 инвайта\nВыполнение задания с получением украшения профиля",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="🩷 2 задания (1400 Orbs)",
+        value="**Цена:** 5 инвайтов\nВыполнение двух заданий Discord за 💎 1400 Orbs",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="🟡 Все задания",
+        value="**Цена:** 10 инвайтов\nВыполнение всех доступных заданий на аккаунте",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="🎁 Nitro Full (3 дня)",
+        value="**Цена:** 5 инвайтов\nDiscord Nitro на 3 дня",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="🟠 1 задание (200 Orbs)",
+        value="**Цена:** 2 инвайта\nВыполнение одного задания Discord за 💎 200 Orbs",
+        inline=False
+    )
+    
+    embed.set_footer(text="💰 Оплата производится вашими приглашениями | /invites - проверить баланс")
+    
+    view = Shop()
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 # ================== /RESET ==================
 @bot.tree.command(name="reset_user", description="Сбросить статистику пользователя (только для админов)")
