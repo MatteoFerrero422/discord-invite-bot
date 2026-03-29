@@ -505,22 +505,38 @@ def is_fake(member):
 async def on_member_join(member):
     guild = member.guild
     
+    # Проверяем кэш
     if guild.id not in invites_cache:
         invites_cache[guild.id] = {}
     
+    # Получаем текущие инвайты
     invites = await guild.invites()
     old = invites_cache[guild.id]
-
+    
+    print(f"🔍 Отслеживание входа {member.name}...")
+    print(f"📊 Всего инвайтов на сервере: {len(invites)}")
+    
     inviter = None
     used_invite = None
-
+    
+    # Ищем, какой инвайт использовался
     for invite in invites:
-        old_uses = old.get(invite.code, {}).get('uses', 0) if isinstance(old.get(invite.code), dict) else old.get(invite.code, 0)
+        # Получаем старое количество использований
+        old_data = old.get(invite.code)
+        if isinstance(old_data, dict):
+            old_uses = old_data.get('uses', 0)
+        else:
+            old_uses = old_data if old_data else 0
+        
+        # Если использований стало больше - нашли!
         if invite.uses > old_uses:
             inviter = invite.inviter
             used_invite = invite.code
+            print(f"✅ Найден использованный инвайт: {invite.code} (было {old_uses}, стало {invite.uses})")
+            print(f"👤 Пригласил: {inviter.name if inviter else 'Неизвестно'}")
             break
-
+    
+    # Обновляем кэш
     new_cache = {}
     for invite in invites:
         new_cache[invite.code] = {
@@ -528,18 +544,34 @@ async def on_member_join(member):
             'inviter': invite.inviter.id if invite.inviter else None
         }
     invites_cache[guild.id] = new_cache
-
+    
+    # Лог-канал
     channel = bot.get_channel(LOG_CHANNEL_ID)
     if not channel:
         print(f"❌ Канал с ID {LOG_CHANNEL_ID} не найден!")
         return
-
+    
+    # Проверка на фейк
     if is_fake(member):
         await channel.send(f"⚠️ {member.mention} подозрительный аккаунт (возраст менее {MIN_ACCOUNT_AGE_DAYS} дней) - не засчитан")
         return
-
+    
+    # Если пригласивший найден
     if inviter:
         async with aiosqlite.connect("db.sqlite3") as db:
+            # Проверяем, не было ли уже такого приглашения
+            cursor = await db.execute(
+                "SELECT inviter_id FROM joins WHERE user_id=?",
+                (member.id,)
+            )
+            already_joined = await cursor.fetchone()
+            
+            if already_joined:
+                print(f"⚠️ Пользователь {member.name} уже был приглашён ранее, пропускаем")
+                await channel.send(f"⚠️ {member.mention} уже был на сервере ранее - инвайт не засчитан")
+                return
+            
+            # Обновляем статистику пригласившего
             await db.execute("""
             INSERT INTO users (user_id, invited, total_invites)
             VALUES (?, 1, 1)
@@ -547,18 +579,24 @@ async def on_member_join(member):
                 invited = invited + 1,
                 total_invites = total_invites + 1
             """, (inviter.id,))
-
+            
+            # Записываем факт приглашения
             await db.execute(
                 "INSERT INTO joins (user_id, inviter_id, join_date) VALUES (?, ?, datetime('now'))",
                 (member.id, inviter.id)
             )
             
+            # Записываем историю инвайта
             await db.execute(
                 "INSERT INTO invite_history (user_id, inviter_id, invite_code, date) VALUES (?, ?, ?, datetime('now'))",
                 (member.id, inviter.id, used_invite)
             )
-
+            
             await db.commit()
+            
+            # Получаем актуальное количество
+            new_count = await get_invites_count(inviter.id)
+            print(f"📊 У {inviter.name} теперь {new_count} инвайтов")
         
         await channel.send(
             f"👤 {member.mention} зашел на сервер\n"
@@ -568,8 +606,33 @@ async def on_member_join(member):
     else:
         await channel.send(
             f"👤 {member.mention} зашел на сервер\n"
-            f"📨 Пригласил: Неизвестно"
+            f"📨 Пригласил: Неизвестно (возможно, по старой ссылке или invite кнопке)"
         )
+
+# ================== КОМАНДА /CHECKINVITES ==================
+@bot.tree.command(name="checkinvites", description="Проверить все инвайты на сервере (только для админов)")
+async def checkinvites(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+        return
+    
+    guild = interaction.guild
+    invites = await guild.invites()
+    
+    embed = discord.Embed(
+        title="📊 Список инвайтов на сервере",
+        color=discord.Color.blue()
+    )
+    
+    for invite in invites:
+        inviter_name = invite.inviter.name if invite.inviter else "Неизвестно"
+        embed.add_field(
+            name=f"Код: {invite.code}",
+            value=f"Создал: {inviter_name}\nИспользований: {invite.uses}\nКанал: {invite.channel.mention}",
+            inline=False
+        )
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ================== ВЫХОД ==================
 @bot.event
