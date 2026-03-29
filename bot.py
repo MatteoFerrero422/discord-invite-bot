@@ -616,23 +616,101 @@ async def checkinvites(interaction: discord.Interaction):
         await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
         return
     
+    await interaction.response.defer(ephemeral=True)
+    
     guild = interaction.guild
     invites = await guild.invites()
     
-    embed = discord.Embed(
-        title="📊 Список инвайтов на сервере",
-        color=discord.Color.blue()
-    )
+    if not invites:
+        await interaction.followup.send("📊 На сервере нет созданных инвайтов!")
+        return
     
-    for invite in invites:
-        inviter_name = invite.inviter.name if invite.inviter else "Неизвестно"
-        embed.add_field(
-            name=f"Код: {invite.code}",
-            value=f"Создал: {inviter_name}\nИспользований: {invite.uses}\nКанал: {invite.channel.mention}",
-            inline=False
+    # Разбиваем инвайты на страницы по 20 штук
+    items_per_page = 20
+    pages = []
+    
+    for i in range(0, len(invites), items_per_page):
+        page_invites = invites[i:i + items_per_page]
+        embed = discord.Embed(
+            title=f"📊 Список инвайтов на сервере (страница {len(pages) + 1})",
+            color=discord.Color.blue()
         )
+        
+        for invite in page_invites:
+            inviter_name = invite.inviter.name if invite.inviter else "Неизвестно"
+            embed.add_field(
+                name=f"🔗 {invite.code}",
+                value=f"Создал: {inviter_name}\nИспользований: {invite.uses}\nКанал: {invite.channel.mention}",
+                inline=False
+            )
+        
+        embed.set_footer(text=f"Всего инвайтов: {len(invites)}")
+        pages.append(embed)
     
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    if not pages:
+        await interaction.followup.send("📊 Нет инвайтов для отображения!")
+        return
+    
+    # Создаем view с кнопками для навигации
+    class Paginator(View):
+        def __init__(self, pages, author_id):
+            super().__init__(timeout=60)
+            self.pages = pages
+            self.current_page = 0
+            self.author_id = author_id
+        
+        async def update_message(self, interaction):
+            await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+        
+        @discord.ui.button(label="◀ Назад", style=discord.ButtonStyle.blurple)
+        async def previous(self, interaction: discord.Interaction, button: Button):
+            if interaction.user.id != self.author_id:
+                await interaction.response.send_message("❌ Это не ваша команда!", ephemeral=True)
+                return
+            self.current_page = (self.current_page - 1) % len(self.pages)
+            await self.update_message(interaction)
+        
+        @discord.ui.button(label="Вперед ▶", style=discord.ButtonStyle.blurple)
+        async def next(self, interaction: discord.Interaction, button: Button):
+            if interaction.user.id != self.author_id:
+                await interaction.response.send_message("❌ Это не ваша команда!", ephemeral=True)
+                return
+            self.current_page = (self.current_page + 1) % len(self.pages)
+            await self.update_message(interaction)
+        
+        @discord.ui.button(label="❌ Закрыть", style=discord.ButtonStyle.red)
+        async def close(self, interaction: discord.Interaction, button: Button):
+            if interaction.user.id != self.author_id:
+                await interaction.response.send_message("❌ Это не ваша команда!", ephemeral=True)
+                return
+            await interaction.message.delete()
+            self.stop()
+    
+    view = Paginator(pages, interaction.user.id)
+    await interaction.followup.send(embed=pages[0], view=view)True)
+
+# ================== КОМАНДА /FIXINVITES ==================
+@bot.tree.command(name="fixinvites", description="Принудительно обновить кэш инвайтов (только для админов)")
+async def fixinvites(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+        return
+    
+    await interaction.response.defer(ephemeral=True)
+    
+    guild = interaction.guild
+    try:
+        invites = await guild.invites()
+        invites_cache[guild.id] = {}
+        for invite in invites:
+            invites_cache[guild.id][invite.code] = {
+                'uses': invite.uses,
+                'inviter': invite.inviter.id if invite.inviter else None,
+                'inviter_name': invite.inviter.name if invite.inviter else None
+            }
+        await interaction.followup.send(f"✅ Кэш инвайтов обновлён! Загружено {len(invites)} инвайтов.")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Ошибка: {e}")
 
 # ================== ВЫХОД ==================
 @bot.event
