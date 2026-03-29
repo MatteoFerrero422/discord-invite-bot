@@ -43,7 +43,7 @@ TOKEN = os.getenv("TOKEN")
 GUILD_ID = 1176162885811060756
 LOG_CHANNEL_ID = 1455165169075490963
 TICKET_CATEGORY_ID = 1486980315825049640
-ORDERS_CHANNEL_ID = 1372910944472006706  # Канал для заказов
+ORDERS_CHANNEL_ID = 1372910944472006706
 BUYER_ROLE = "Покупатель"
 REGULAR_ROLE = "Постоянный покупатель"
 MIN_ACCOUNT_AGE_DAYS = 3
@@ -56,7 +56,7 @@ intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 invites_cache = {}
-order_counter = 496  # Начинаем с #496
+order_counter = 496
 
 # ================== БАЗА ==================
 async def init_db():
@@ -70,7 +70,6 @@ async def init_db():
             total_invites INTEGER DEFAULT 0
         )
         """)
-
         await db.execute("""
         CREATE TABLE IF NOT EXISTS purchases (
             user_id INTEGER,
@@ -79,7 +78,6 @@ async def init_db():
             order_number INTEGER
         )
         """)
-
         await db.execute("""
         CREATE TABLE IF NOT EXISTS joins (
             user_id INTEGER,
@@ -87,7 +85,6 @@ async def init_db():
             join_date TEXT
         )
         """)
-
         await db.execute("""
         CREATE TABLE IF NOT EXISTS invite_history (
             user_id INTEGER,
@@ -96,7 +93,6 @@ async def init_db():
             date TEXT
         )
         """)
-
         await db.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             order_number INTEGER PRIMARY KEY,
@@ -107,7 +103,6 @@ async def init_db():
             created_at TEXT
         )
         """)
-
         await db.commit()
 
 async def get_next_order_number():
@@ -121,29 +116,26 @@ async def get_next_order_number():
             order_counter = 496
     return order_counter
 
-# ================== МИГРАЦИЯ БАЗЫ ==================
+# ================== МИГРАЦИЯ ==================
 async def migrate_db():
     async with aiosqlite.connect("db.sqlite3") as db:
         cursor = await db.execute("PRAGMA table_info(joins)")
         columns = [column[1] for column in await cursor.fetchall()]
-        
         if "join_date" not in columns:
             try:
                 await db.execute("ALTER TABLE joins ADD COLUMN join_date TEXT")
-                print("✅ Добавлена колонка join_date в таблицу joins")
+                print("✅ Добавлена колонка join_date")
             except:
                 pass
         
         cursor = await db.execute("PRAGMA table_info(users)")
         columns = [column[1] for column in await cursor.fetchall()]
-        
         if "total_invites" not in columns:
             try:
                 await db.execute("ALTER TABLE users ADD COLUMN total_invites INTEGER DEFAULT 0")
                 print("✅ Добавлена колонка total_invites")
             except:
                 pass
-        
         await db.commit()
 
 # ================== СТАРТ ==================
@@ -170,11 +162,9 @@ async def on_ready():
                     'inviter': invite.inviter.id if invite.inviter else None
                 }
         except Exception as e:
-            print(f"❌ Ошибка загрузки инвайтов для гильдии {guild.id}: {e}")
+            print(f"❌ Ошибка загрузки инвайтов: {e}")
 
     print(f"✅ Бот запущен: {bot.user}")
-    print(f"🎮 Команды доступны на сервере с ID: {GUILD_ID}")
-    
     await bot.change_presence(activity=discord.Game(name="/help | /shop"))
 
 # ================== КОМАНДА /HELP ==================
@@ -188,7 +178,6 @@ async def help_command(interaction: discord.Interaction):
         color=discord.Color.blue()
     )
     
-    # Общие команды
     embed.add_field(
         name="📋 Общие команды",
         value=(
@@ -201,16 +190,17 @@ async def help_command(interaction: discord.Interaction):
         inline=False
     )
     
-    # Админ команды
     if is_admin:
         embed.add_field(
             name="👑 Административные команды",
             value=(
-                "`/giveinvites <user> <amount>` - Выдать инвайты пользователю\n"
-                "`/takeinvites <user> <amount>` - Забрать инвайты у пользователя\n"
-                "`/reset_user <user>` - Сбросить статистику пользователя\n"
+                "`/giveinvites <user> <amount>` - Выдать инвайты\n"
+                "`/takeinvites <user> <amount>` - Забрать инвайты\n"
+                "`/reset_user <user>` - Сбросить статистику\n"
                 "`/sync` - Синхронизировать команды\n"
-                "`/successful <order_number>` - Отметить заказ как выполненный"
+                "`/successful <order_number>` - Отметить заказ\n"
+                "`/checkinvites` - Список всех инвайтов\n"
+                "`/fixinvites` - Обновить кэш инвайтов"
             ),
             inline=False
         )
@@ -218,11 +208,107 @@ async def help_command(interaction: discord.Interaction):
     embed.set_footer(text="Бот для помощи с заданиями Discord")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+# ================== КОМАНДА /CHECKINVITES (С ПАГИНАЦИЕЙ) ==================
+class InvitePaginator(View):
+    def __init__(self, pages, author_id):
+        super().__init__(timeout=60)
+        self.pages = pages
+        self.current_page = 0
+        self.author_id = author_id
+    
+    async def update_message(self, interaction):
+        await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+    
+    @discord.ui.button(label="◀ Назад", style=discord.ButtonStyle.blurple)
+    async def previous(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ Это не ваша команда!", ephemeral=True)
+            return
+        self.current_page = (self.current_page - 1) % len(self.pages)
+        await self.update_message(interaction)
+    
+    @discord.ui.button(label="Вперед ▶", style=discord.ButtonStyle.blurple)
+    async def next(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ Это не ваша команда!", ephemeral=True)
+            return
+        self.current_page = (self.current_page + 1) % len(self.pages)
+        await self.update_message(interaction)
+    
+    @discord.ui.button(label="❌ Закрыть", style=discord.ButtonStyle.red)
+    async def close(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ Это не ваша команда!", ephemeral=True)
+            return
+        await interaction.message.delete()
+        self.stop()
+
+@bot.tree.command(name="checkinvites", description="Проверить все инвайты на сервере (только для админов)")
+async def checkinvites(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+        return
+    
+    await interaction.response.defer(ephemeral=True)
+    
+    guild = interaction.guild
+    invites = await guild.invites()
+    
+    if not invites:
+        await interaction.followup.send("📊 На сервере нет созданных инвайтов!")
+        return
+    
+    items_per_page = 20
+    pages = []
+    
+    for i in range(0, len(invites), items_per_page):
+        page_invites = invites[i:i + items_per_page]
+        embed = discord.Embed(
+            title=f"📊 Список инвайтов (страница {len(pages) + 1})",
+            color=discord.Color.blue()
+        )
+        
+        for invite in page_invites:
+            inviter_name = invite.inviter.name if invite.inviter else "Неизвестно"
+            embed.add_field(
+                name=f"🔗 {invite.code}",
+                value=f"Создал: {inviter_name}\nИспользований: {invite.uses}\nКанал: {invite.channel.mention}",
+                inline=False
+            )
+        
+        embed.set_footer(text=f"Всего инвайтов: {len(invites)}")
+        pages.append(embed)
+    
+    view = InvitePaginator(pages, interaction.user.id)
+    await interaction.followup.send(embed=pages[0], view=view)
+
+# ================== КОМАНДА /FIXINVITES ==================
+@bot.tree.command(name="fixinvites", description="Принудительно обновить кэш инвайтов (только для админов)")
+async def fixinvites(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+        return
+    
+    await interaction.response.defer(ephemeral=True)
+    
+    guild = interaction.guild
+    try:
+        invites = await guild.invites()
+        invites_cache[guild.id] = {}
+        for invite in invites:
+            invites_cache[guild.id][invite.code] = {
+                'uses': invite.uses,
+                'inviter': invite.inviter.id if invite.inviter else None
+            }
+        await interaction.followup.send(f"✅ Кэш инвайтов обновлён! Загружено {len(invites)} инвайтов.")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Ошибка: {e}")
+
 # ================== КОМАНДА /SUCCESSFUL ==================
 @bot.tree.command(name="successful", description="Отметить заказ как выполненный (только для админов)")
 async def successful(interaction: discord.Interaction, order_number: int):
     if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ У вас нет прав на использование этой команды!", ephemeral=True)
+        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
         return
     
     async with aiosqlite.connect("db.sqlite3") as db:
@@ -238,14 +324,12 @@ async def successful(interaction: discord.Interaction, order_number: int):
         
         user_id, item, message_id = order
         
-        # Обновляем статус в БД
         await db.execute(
             "UPDATE orders SET status='Выполнено' WHERE order_number=?",
             (order_number,)
         )
         await db.commit()
     
-    # Обновляем сообщение в канале заказов
     orders_channel = bot.get_channel(ORDERS_CHANNEL_ID)
     if orders_channel:
         try:
@@ -396,7 +480,7 @@ async def shop_command(interaction):
 @bot.tree.command(name="giveinvites", description="Выдать инвайты пользователю (только для админов)")
 async def giveinvites(interaction: discord.Interaction, user: discord.Member, amount: int):
     if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ У вас нет прав на использование этой команды!", ephemeral=True)
+        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
         return
     
     if amount <= 0:
@@ -411,7 +495,6 @@ async def giveinvites(interaction: discord.Interaction, user: discord.Member, am
             invited = invited + ?,
             total_invites = total_invites + ?
         """, (user.id, amount, amount, amount, amount))
-        
         await db.commit()
     
     embed = discord.Embed(
@@ -420,7 +503,6 @@ async def giveinvites(interaction: discord.Interaction, user: discord.Member, am
         color=discord.Color.green()
     )
     embed.set_footer(text=f"Выдал: {interaction.user.name}")
-    
     await interaction.response.send_message(embed=embed, ephemeral=True)
     
     log_channel = bot.get_channel(LOG_CHANNEL_ID)
@@ -431,7 +513,7 @@ async def giveinvites(interaction: discord.Interaction, user: discord.Member, am
 @bot.tree.command(name="takeinvites", description="Забрать инвайты у пользователя (только для админов)")
 async def takeinvites(interaction: discord.Interaction, user: discord.Member, amount: int):
     if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ У вас нет прав на использование этой команды!", ephemeral=True)
+        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
         return
     
     if amount <= 0:
@@ -459,7 +541,6 @@ async def takeinvites(interaction: discord.Interaction, user: discord.Member, am
             await db.execute("""
             UPDATE users SET spent = spent + ? WHERE user_id=?
             """, (amount, user.id))
-            
             await db.commit()
             
             embed = discord.Embed(
@@ -469,7 +550,6 @@ async def takeinvites(interaction: discord.Interaction, user: discord.Member, am
             )
             embed.add_field(name="Осталось инвайтов", value=f"**{current_valid - amount}**", inline=False)
             embed.set_footer(text=f"Забрал: {interaction.user.name}")
-            
             await interaction.response.send_message(embed=embed, ephemeral=True)
             
             log_channel = bot.get_channel(LOG_CHANNEL_ID)
@@ -482,7 +562,7 @@ async def takeinvites(interaction: discord.Interaction, user: discord.Member, am
 @bot.tree.command(name="sync", description="Синхронизировать команды (только для админов)")
 async def sync_commands(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ У вас нет прав на использование этой команды", ephemeral=True)
+        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
         return
     
     await interaction.response.defer(ephemeral=True)
@@ -505,38 +585,27 @@ def is_fake(member):
 async def on_member_join(member):
     guild = member.guild
     
-    # Проверяем кэш
     if guild.id not in invites_cache:
         invites_cache[guild.id] = {}
     
-    # Получаем текущие инвайты
     invites = await guild.invites()
     old = invites_cache[guild.id]
-    
-    print(f"🔍 Отслеживание входа {member.name}...")
-    print(f"📊 Всего инвайтов на сервере: {len(invites)}")
     
     inviter = None
     used_invite = None
     
-    # Ищем, какой инвайт использовался
     for invite in invites:
-        # Получаем старое количество использований
         old_data = old.get(invite.code)
         if isinstance(old_data, dict):
             old_uses = old_data.get('uses', 0)
         else:
             old_uses = old_data if old_data else 0
         
-        # Если использований стало больше - нашли!
         if invite.uses > old_uses:
             inviter = invite.inviter
             used_invite = invite.code
-            print(f"✅ Найден использованный инвайт: {invite.code} (было {old_uses}, стало {invite.uses})")
-            print(f"👤 Пригласил: {inviter.name if inviter else 'Неизвестно'}")
             break
     
-    # Обновляем кэш
     new_cache = {}
     for invite in invites:
         new_cache[invite.code] = {
@@ -545,262 +614,90 @@ async def on_member_join(member):
         }
     invites_cache[guild.id] = new_cache
     
-    # Лог-канал
     channel = bot.get_channel(LOG_CHANNEL_ID)
     if not channel:
-        print(f"❌ Канал с ID {LOG_CHANNEL_ID} не найден!")
         return
     
-    # Проверка на фейк
     if is_fake(member):
-        await channel.send(f"⚠️ {member.mention} подозрительный аккаунт (возраст менее {MIN_ACCOUNT_AGE_DAYS} дней) - не засчитан")
+        await channel.send(f"⚠️ {member.mention} подозрительный аккаунт - не засчитан")
         return
     
-    # Если пригласивший найден
     if inviter:
         async with aiosqlite.connect("db.sqlite3") as db:
-            # Проверяем, не было ли уже такого приглашения
-            cursor = await db.execute(
-                "SELECT inviter_id FROM joins WHERE user_id=?",
-                (member.id,)
-            )
-            already_joined = await cursor.fetchone()
-            
-            if already_joined:
-                print(f"⚠️ Пользователь {member.name} уже был приглашён ранее, пропускаем")
-                await channel.send(f"⚠️ {member.mention} уже был на сервере ранее - инвайт не засчитан")
-                return
-            
-            # Обновляем статистику пригласившего
-            await db.execute("""
-            INSERT INTO users (user_id, invited, total_invites)
-            VALUES (?, 1, 1)
-            ON CONFLICT(user_id) DO UPDATE SET 
-                invited = invited + 1,
-                total_invites = total_invites + 1
-            """, (inviter.id,))
-            
-            # Записываем факт приглашения
-            await db.execute(
-                "INSERT INTO joins (user_id, inviter_id, join_date) VALUES (?, ?, datetime('now'))",
-                (member.id, inviter.id)
-            )
-            
-            # Записываем историю инвайта
-            await db.execute(
-                "INSERT INTO invite_history (user_id, inviter_id, invite_code, date) VALUES (?, ?, ?, datetime('now'))",
-                (member.id, inviter.id, used_invite)
-            )
-            
-            await db.commit()
-            
-            # Получаем актуальное количество
-            new_count = await get_invites_count(inviter.id)
-            print(f"📊 У {inviter.name} теперь {new_count} инвайтов")
+            cursor = await db.execute("SELECT inviter_id FROM joins WHERE user_id=?", (member.id,))
+            if not await cursor.fetchone():
+                await db.execute("""
+                INSERT INTO users (user_id, invited, total_invites)
+                VALUES (?, 1, 1)
+                ON CONFLICT(user_id) DO UPDATE SET 
+                    invited = invited + 1,
+                    total_invites = total_invites + 1
+                """, (inviter.id,))
+                await db.execute("INSERT INTO joins (user_id, inviter_id, join_date) VALUES (?, ?, datetime('now'))", (member.id, inviter.id))
+                await db.execute("INSERT INTO invite_history (user_id, inviter_id, invite_code, date) VALUES (?, ?, ?, datetime('now'))", (member.id, inviter.id, used_invite))
+                await db.commit()
         
-        await channel.send(
-            f"👤 {member.mention} зашел на сервер\n"
-            f"📨 Пригласил: {inviter.mention}\n"
-            f"📊 Всего приглашений у {inviter.name}: {await get_invites_count(inviter.id)}"
-        )
+        await channel.send(f"👤 {member.mention} зашел\n📨 Пригласил: {inviter.mention}\n📊 Всего приглашений: {await get_invites_count(inviter.id)}")
     else:
-        await channel.send(
-            f"👤 {member.mention} зашел на сервер\n"
-            f"📨 Пригласил: Неизвестно (возможно, по старой ссылке или invite кнопке)"
-        )
-
-# ================== КОМАНДА /CHECKINVITES ==================
-@bot.tree.command(name="checkinvites", description="Проверить все инвайты на сервере (только для админов)")
-async def checkinvites(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
-        return
-    
-    await interaction.response.defer(ephemeral=True)
-    
-    guild = interaction.guild
-    invites = await guild.invites()
-    
-    if not invites:
-        await interaction.followup.send("📊 На сервере нет созданных инвайтов!")
-        return
-    
-    # Разбиваем инвайты на страницы по 20 штук
-    items_per_page = 20
-    pages = []
-    
-    for i in range(0, len(invites), items_per_page):
-        page_invites = invites[i:i + items_per_page]
-        embed = discord.Embed(
-            title=f"📊 Список инвайтов на сервере (страница {len(pages) + 1})",
-            color=discord.Color.blue()
-        )
-        
-        for invite in page_invites:
-            inviter_name = invite.inviter.name if invite.inviter else "Неизвестно"
-            embed.add_field(
-                name=f"🔗 {invite.code}",
-                value=f"Создал: {inviter_name}\nИспользований: {invite.uses}\nКанал: {invite.channel.mention}",
-                inline=False
-            )
-        
-        embed.set_footer(text=f"Всего инвайтов: {len(invites)}")
-        pages.append(embed)
-    
-    if not pages:
-        await interaction.followup.send("📊 Нет инвайтов для отображения!")
-        return
-    
-    # Создаем view с кнопками для навигации
-    class Paginator(View):
-        def __init__(self, pages, author_id):
-            super().__init__(timeout=60)
-            self.pages = pages
-            self.current_page = 0
-            self.author_id = author_id
-        
-        async def update_message(self, interaction):
-            await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
-        
-        @discord.ui.button(label="◀ Назад", style=discord.ButtonStyle.blurple)
-        async def previous(self, interaction: discord.Interaction, button: Button):
-            if interaction.user.id != self.author_id:
-                await interaction.response.send_message("❌ Это не ваша команда!", ephemeral=True)
-                return
-            self.current_page = (self.current_page - 1) % len(self.pages)
-            await self.update_message(interaction)
-        
-        @discord.ui.button(label="Вперед ▶", style=discord.ButtonStyle.blurple)
-        async def next(self, interaction: discord.Interaction, button: Button):
-            if interaction.user.id != self.author_id:
-                await interaction.response.send_message("❌ Это не ваша команда!", ephemeral=True)
-                return
-            self.current_page = (self.current_page + 1) % len(self.pages)
-            await self.update_message(interaction)
-        
-        @discord.ui.button(label="❌ Закрыть", style=discord.ButtonStyle.red)
-        async def close(self, interaction: discord.Interaction, button: Button):
-            if interaction.user.id != self.author_id:
-                await interaction.response.send_message("❌ Это не ваша команда!", ephemeral=True)
-                return
-            await interaction.message.delete()
-            self.stop()
-    
-    view = Paginator(pages, interaction.user.id)
-    await interaction.followup.send(embed=pages[0], view=view)True)
-
-# ================== КОМАНДА /FIXINVITES ==================
-@bot.tree.command(name="fixinvites", description="Принудительно обновить кэш инвайтов (только для админов)")
-async def fixinvites(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
-        return
-    
-    await interaction.response.defer(ephemeral=True)
-    
-    guild = interaction.guild
-    try:
-        invites = await guild.invites()
-        invites_cache[guild.id] = {}
-        for invite in invites:
-            invites_cache[guild.id][invite.code] = {
-                'uses': invite.uses,
-                'inviter': invite.inviter.id if invite.inviter else None,
-                'inviter_name': invite.inviter.name if invite.inviter else None
-            }
-        await interaction.followup.send(f"✅ Кэш инвайтов обновлён! Загружено {len(invites)} инвайтов.")
-    except Exception as e:
-        await interaction.followup.send(f"❌ Ошибка: {e}")
+        await channel.send(f"👤 {member.mention} зашел\n📨 Пригласил: Неизвестно")
 
 # ================== ВЫХОД ==================
 @bot.event
 async def on_member_remove(member):
     async with aiosqlite.connect("db.sqlite3") as db:
-        cursor = await db.execute(
-            "SELECT inviter_id FROM joins WHERE user_id=? ORDER BY join_date DESC LIMIT 1",
-            (member.id,)
-        )
+        cursor = await db.execute("SELECT inviter_id FROM joins WHERE user_id=? ORDER BY join_date DESC LIMIT 1", (member.id,))
         data = await cursor.fetchone()
-
         if data:
             inviter_id = data[0]
-
-            await db.execute("""
-            UPDATE users SET left = left + 1 WHERE user_id=?
-            """, (inviter_id,))
-
+            await db.execute("UPDATE users SET left = left + 1 WHERE user_id=?", (inviter_id,))
             await db.commit()
             
             channel = bot.get_channel(LOG_CHANNEL_ID)
             if channel:
                 try:
                     inviter = await bot.fetch_user(inviter_id)
-                    await channel.send(
-                        f"👋 {member.mention} покинул сервер\n"
-                        f"📊 У пригласившего ({inviter.name}) засчитан выход"
-                    )
+                    await channel.send(f"👋 {member.mention} покинул сервер\n📊 У пригласившего ({inviter.name}) засчитан выход")
                 except:
-                    await channel.send(
-                        f"👋 {member.mention} покинул сервер\n"
-                        f"📊 У пригласившего (ID: {inviter_id}) засчитан выход"
-                    )
+                    await channel.send(f"👋 {member.mention} покинул сервер\n📊 У пригласившего (ID: {inviter_id}) засчитан выход")
 
-# ================== ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ==================
+# ================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================
 async def get_invites_count(user_id):
     async with aiosqlite.connect("db.sqlite3") as db:
-        cursor = await db.execute(
-            "SELECT invited, left, spent FROM users WHERE user_id=?",
-            (user_id,)
-        )
+        cursor = await db.execute("SELECT invited, left, spent FROM users WHERE user_id=?", (user_id,))
         data = await cursor.fetchone()
-    
     if data:
-        invited, left, spent = data
-        return invited - left - spent
+        return data[0] - data[1] - data[2]
     return 0
 
 # ================== /INVITES ==================
 @bot.tree.command(name="invites", description="Показать статистику ваших приглашений")
 async def invites(interaction: discord.Interaction):
     async with aiosqlite.connect("db.sqlite3") as db:
-        cursor = await db.execute(
-            "SELECT invited, left, spent, total_invites FROM users WHERE user_id=?",
-            (interaction.user.id,)
-        )
+        cursor = await db.execute("SELECT invited, left, spent, total_invites FROM users WHERE user_id=?", (interaction.user.id,))
         data = await cursor.fetchone()
-
+    
     if data:
         invited, left, spent, total_invites = data
         valid = invited - left - spent
     else:
         invited = left = spent = total_invites = 0
         valid = 0
-
-    async with aiosqlite.connect("db.sqlite3") as db:
-        cursor = await db.execute(
-            "SELECT item, date FROM purchases WHERE user_id=? ORDER BY date DESC LIMIT 10",
-            (interaction.user.id,)
-        )
-        purchases = await cursor.fetchall()
-
-    embed = discord.Embed(
-        title=f"📊 Статистика {interaction.user.name}",
-        color=discord.Color.blue()
-    )
     
+    cursor = await db.execute("SELECT item, date FROM purchases WHERE user_id=? ORDER BY date DESC LIMIT 10", (interaction.user.id,))
+    purchases = await cursor.fetchall()
+    
+    embed = discord.Embed(title=f"📊 Статистика {interaction.user.name}", color=discord.Color.blue())
     embed.add_field(name="✅ Доступно", value=f"**{valid}**", inline=True)
     embed.add_field(name="📥 Пригласил", value=f"{invited}", inline=True)
     embed.add_field(name="📤 Вышли", value=f"{left}", inline=True)
     embed.add_field(name="💸 Потрачено", value=f"{spent}", inline=True)
-    embed.add_field(name="📈 Всего инвайтов за всё время", value=f"{total_invites}", inline=True)
+    embed.add_field(name="📈 Всего инвайтов", value=f"{total_invites}", inline=True)
     
     if purchases:
         history = "\n".join([f"• {item} ({date[:10]})" for item, date in purchases])
         embed.add_field(name="🛒 Последние покупки", value=history, inline=False)
     else:
         embed.add_field(name="🛒 Покупки", value="Нет покупок", inline=False)
-    
-    embed.set_footer(text=f"ID: {interaction.user.id}")
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -810,22 +707,16 @@ async def top(interaction: discord.Interaction):
     async with aiosqlite.connect("db.sqlite3") as db:
         cursor = await db.execute("""
         SELECT user_id, invited - left - spent as total
-        FROM users
-        WHERE invited - left - spent > 0
-        ORDER BY total DESC
-        LIMIT 10
+        FROM users WHERE invited - left - spent > 0
+        ORDER BY total DESC LIMIT 10
         """)
         data = await cursor.fetchall()
-
+    
     if not data:
         await interaction.response.send_message("📊 Пока нет пользователей с приглашениями!", ephemeral=True)
         return
-
-    embed = discord.Embed(
-        title="🏆 ТОП 10 ИНВАЙТЕРОВ",
-        color=discord.Color.gold()
-    )
     
+    embed = discord.Embed(title="🏆 ТОП 10 ИНВАЙТЕРОВ", color=discord.Color.gold())
     text = ""
     for i, (user_id, total) in enumerate(data, 1):
         try:
@@ -833,7 +724,6 @@ async def top(interaction: discord.Interaction):
             name = user.name
         except:
             name = f"User {user_id}"
-        
         medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "🔹"
         text += f"{medal} **{i}.** {name} — **{total}** приглашений\n"
     
@@ -844,7 +734,7 @@ async def top(interaction: discord.Interaction):
 class TicketView(View):
     def __init__(self):
         super().__init__(timeout=None)
-
+    
     @discord.ui.button(label="❌ Закрыть тикет", style=discord.ButtonStyle.red)
     async def close(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_message("Тикет будет закрыт через 5 секунд...")
@@ -855,59 +745,41 @@ class TicketView(View):
 class Shop(View):
     def __init__(self):
         super().__init__(timeout=None)
-
+    
     async def get_user(self, user_id):
         async with aiosqlite.connect("db.sqlite3") as db:
-            cursor = await db.execute(
-                "SELECT invited, left, spent FROM users WHERE user_id=?",
-                (user_id,)
-            )
+            cursor = await db.execute("SELECT invited, left, spent FROM users WHERE user_id=?", (user_id,))
             return await cursor.fetchone()
-
+    
     async def process(self, interaction, cost, item_name, item_description):
         data = await self.get_user(interaction.user.id)
         invited, left, spent = data if data else (0,0,0)
-
         valid = invited - left - spent
-
+        
         if valid < cost:
             await interaction.response.send_message(f"❌ Недостаточно инвайтов! Нужно: {cost}, у вас: {valid}", ephemeral=True)
             return
-
-        # Создаем канал для тикета
+        
         guild = interaction.guild
         category = discord.utils.get(guild.categories, id=TICKET_CATEGORY_ID)
-        
         if not category:
             await interaction.response.send_message("❌ Категория для тикетов не найдена!", ephemeral=True)
             return
-
-        channel = await guild.create_text_channel(
-            f"заказ-{interaction.user.name}",
-            category=category
-        )
-
+        
+        channel = await guild.create_text_channel(f"заказ-{interaction.user.name}", category=category)
         await channel.set_permissions(interaction.user, read_messages=True, send_messages=True)
         await channel.set_permissions(guild.default_role, read_messages=False)
-
-        # Получаем номер заказа
+        
         order_number = await get_next_order_number()
         
-        # Создаем embed для тикет-канала
         embed = discord.Embed(
             title="🛒 Новый заказ",
             description=f"**Товар:** {item_name}\n{item_description}\n**Цена:** {cost} инвайтов\n**Номер заказа:** #{order_number}",
             color=discord.Color.green()
         )
         embed.set_footer(text=f"Заказчик: {interaction.user.name}")
-
-        await channel.send(
-            content=f"{interaction.user.mention}",
-            embed=embed,
-            view=TicketView()
-        )
-
-        # Отправляем заказ в общий канал заказов
+        await channel.send(content=f"{interaction.user.mention}", embed=embed, view=TicketView())
+        
         orders_channel = bot.get_channel(ORDERS_CHANNEL_ID)
         order_message = None
         if orders_channel:
@@ -918,71 +790,48 @@ class Shop(View):
             )
             order_embed.add_field(name="Статус", value="⏳ Ожидается", inline=False)
             order_embed.set_footer(text=f"ID: {interaction.user.id}")
-            
             order_message = await orders_channel.send(embed=order_embed)
-        else:
-            print(f"❌ Канал с ID {ORDERS_CHANNEL_ID} не найден!")
-
-        # Сохраняем в БД
+        
         async with aiosqlite.connect("db.sqlite3") as db:
-            await db.execute("""
-            UPDATE users SET spent = spent + ? WHERE user_id=?
-            """, (cost, interaction.user.id))
-
-            await db.execute(
-                "INSERT INTO purchases (user_id, item, date, order_number) VALUES (?, ?, datetime('now'), ?)",
-                (interaction.user.id, f"{item_name} ({cost} инвайтов)", order_number)
-            )
-            
-            await db.execute("""
-            INSERT INTO orders (order_number, user_id, item, status, message_id, created_at)
-            VALUES (?, ?, ?, 'Ожидается', ?, datetime('now'))
-            """, (order_number, interaction.user.id, item_name, order_message.id if order_message else 0))
-
+            await db.execute("UPDATE users SET spent = spent + ? WHERE user_id=?", (cost, interaction.user.id))
+            await db.execute("INSERT INTO purchases (user_id, item, date, order_number) VALUES (?, ?, datetime('now'), ?)",
+                           (interaction.user.id, f"{item_name} ({cost} инвайтов)", order_number))
+            await db.execute("INSERT INTO orders (order_number, user_id, item, status, message_id, created_at) VALUES (?, ?, ?, 'Ожидается', ?, datetime('now'))",
+                           (order_number, interaction.user.id, item_name, order_message.id if order_message else 0))
             await db.commit()
-
-        # Выдача ролей
+        
         buyer = discord.utils.get(guild.roles, name=BUYER_ROLE)
         regular = discord.utils.get(guild.roles, name=REGULAR_ROLE)
-
         if buyer:
             await interaction.user.add_roles(buyer)
         
-        async with aiosqlite.connect("db.sqlite3") as db:
-            cursor = await db.execute(
-                "SELECT COUNT(*) FROM purchases WHERE user_id=?",
-                (interaction.user.id,)
-            )
-            count = (await cursor.fetchone())[0]
-
+        cursor = await db.execute("SELECT COUNT(*) FROM purchases WHERE user_id=?", (interaction.user.id,))
+        count = (await cursor.fetchone())[0]
         if count >= 2 and regular:
             await interaction.user.add_roles(regular)
-
-        await interaction.response.send_message(
-            f"✅ Заказ #{order_number} создан! Перейдите в канал {channel.mention}\nЗаказ отправлен в канал ожидания.",
-            ephemeral=True
-        )
-
+        
+        await interaction.response.send_message(f"✅ Заказ #{order_number} создан! Перейдите в канал {channel.mention}", ephemeral=True)
+    
     @discord.ui.button(label="🟠 1 задание (700 Orbs) - 3 инвайта", style=discord.ButtonStyle.green)
     async def b1(self, interaction: discord.Interaction, button: Button):
         await self.process(interaction, 3, "1 задание (700 Orbs)", "Выполнение одного задания Discord за 💎 700 Orbs")
-
+    
     @discord.ui.button(label="🔵 Задание с украшением - 3 инвайта", style=discord.ButtonStyle.blurple)
     async def b2(self, interaction: discord.Interaction, button: Button):
         await self.process(interaction, 3, "Задание с украшением", "Выполнение задания с получением украшения профиля")
-
+    
     @discord.ui.button(label="🩷 2 задания (1400 Orbs) - 5 инвайтов", style=discord.ButtonStyle.green)
     async def b3(self, interaction: discord.Interaction, button: Button):
         await self.process(interaction, 5, "2 задания (1400 Orbs)", "Выполнение двух заданий Discord за 💎 1400 Orbs")
-
+    
     @discord.ui.button(label="🟡 Все задания - 10 инвайтов", style=discord.ButtonStyle.blurple)
     async def b4(self, interaction: discord.Interaction, button: Button):
         await self.process(interaction, 10, "Все доступные задания", "Выполнение всех доступных заданий на аккаунте")
-
+    
     @discord.ui.button(label="🎁 Nitro Full (3 дня) - 5 инвайтов", style=discord.ButtonStyle.green)
     async def b5(self, interaction: discord.Interaction, button: Button):
         await self.process(interaction, 5, "Nitro Full на 3 дня", "Получение Discord Nitro на 3 дня")
-
+    
     @discord.ui.button(label="🟠 1 задание (200 Orbs) - 2 инвайта", style=discord.ButtonStyle.blurple)
     async def b6(self, interaction: discord.Interaction, button: Button):
         await self.process(interaction, 2, "1 задание (200 Orbs)", "Выполнение одного задания Discord за 💎 200 Orbs")
