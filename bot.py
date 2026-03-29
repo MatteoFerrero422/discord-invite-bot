@@ -8,6 +8,7 @@ import os
 from flask import Flask, jsonify
 from threading import Thread
 import logging
+import random
 
 # ================== FLASK ДЛЯ KEEP-ALIVE ==================
 app = Flask('')
@@ -28,7 +29,6 @@ def ping():
     return "pong", 200
 
 def run():
-    # Используем порт, который даёт Render (или 10000 по умолчанию)
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
@@ -39,16 +39,15 @@ def keep_alive():
     print(f"🌐 Веб-сервер для keep-alive запущен на порту {os.environ.get('PORT', 10000)}")
 
 # ================== КОНФИГУРАЦИЯ ==================
-# Токен берется из переменной окружения (безопасно!)
 TOKEN = os.getenv("TOKEN")
 GUILD_ID = 1176162885811060756
 LOG_CHANNEL_ID = 1455165169075490963
 TICKET_CATEGORY_ID = 1486980315825049640
+ORDERS_CHANNEL_ID = 1372910944472006706  # Канал для заказов
 BUYER_ROLE = "Покупатель"
 REGULAR_ROLE = "Постоянный покупатель"
 MIN_ACCOUNT_AGE_DAYS = 3
 
-# Проверка наличия токена
 if not TOKEN:
     print("❌ ОШИБКА: Токен не найден! Установите переменную окружения TOKEN")
     exit(1)
@@ -57,33 +56,7 @@ intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 invites_cache = {}
-
-# ================== МИГРАЦИЯ БАЗЫ ==================
-async def migrate_db():
-    async with aiosqlite.connect("db.sqlite3") as db:
-        # Добавляем колонку join_date в таблицу joins если её нет
-        cursor = await db.execute("PRAGMA table_info(joins)")
-        columns = [column[1] for column in await cursor.fetchall()]
-        
-        if "join_date" not in columns:
-            try:
-                await db.execute("ALTER TABLE joins ADD COLUMN join_date TEXT")
-                print("✅ Добавлена колонка join_date в таблицу joins")
-            except:
-                pass
-        
-        # Добавляем другие колонки если нужно
-        cursor = await db.execute("PRAGMA table_info(users)")
-        columns = [column[1] for column in await cursor.fetchall()]
-        
-        if "total_invites" not in columns:
-            try:
-                await db.execute("ALTER TABLE users ADD COLUMN total_invites INTEGER DEFAULT 0")
-                print("✅ Добавлена колонка total_invites")
-            except:
-                pass
-        
-        await db.commit()
+order_counter = 496  # Начинаем с #496
 
 # ================== БАЗА ==================
 async def init_db():
@@ -102,7 +75,8 @@ async def init_db():
         CREATE TABLE IF NOT EXISTS purchases (
             user_id INTEGER,
             item TEXT,
-            date TEXT
+            date TEXT,
+            order_number INTEGER
         )
         """)
 
@@ -123,17 +97,61 @@ async def init_db():
         )
         """)
 
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            order_number INTEGER PRIMARY KEY,
+            user_id INTEGER,
+            item TEXT,
+            status TEXT,
+            message_id INTEGER,
+            created_at TEXT
+        )
+        """)
+
         await db.commit()
-    
-    # Выполняем миграцию для существующей базы
-    await migrate_db()
+
+async def get_next_order_number():
+    global order_counter
+    async with aiosqlite.connect("db.sqlite3") as db:
+        cursor = await db.execute("SELECT MAX(order_number) FROM orders")
+        data = await cursor.fetchone()
+        if data and data[0]:
+            order_counter = data[0] + 1
+        else:
+            order_counter = 496
+    return order_counter
+
+# ================== МИГРАЦИЯ БАЗЫ ==================
+async def migrate_db():
+    async with aiosqlite.connect("db.sqlite3") as db:
+        cursor = await db.execute("PRAGMA table_info(joins)")
+        columns = [column[1] for column in await cursor.fetchall()]
+        
+        if "join_date" not in columns:
+            try:
+                await db.execute("ALTER TABLE joins ADD COLUMN join_date TEXT")
+                print("✅ Добавлена колонка join_date в таблицу joins")
+            except:
+                pass
+        
+        cursor = await db.execute("PRAGMA table_info(users)")
+        columns = [column[1] for column in await cursor.fetchall()]
+        
+        if "total_invites" not in columns:
+            try:
+                await db.execute("ALTER TABLE users ADD COLUMN total_invites INTEGER DEFAULT 0")
+                print("✅ Добавлена колонка total_invites")
+            except:
+                pass
+        
+        await db.commit()
 
 # ================== СТАРТ ==================
 @bot.event
 async def on_ready():
     await init_db()
+    await migrate_db()
     
-    # Синхронизация команд
     try:
         guild = discord.Object(id=GUILD_ID)
         bot.tree.copy_global_to(guild=guild)
@@ -142,34 +160,119 @@ async def on_ready():
     except Exception as e:
         print(f"❌ Ошибка синхронизации: {e}")
     
-    # Загрузка истории приглашений при старте
     for guild in bot.guilds:
         try:
             invites = await guild.invites()
-            
             invites_cache[guild.id] = {}
             for invite in invites:
                 invites_cache[guild.id][invite.code] = {
                     'uses': invite.uses,
                     'inviter': invite.inviter.id if invite.inviter else None
                 }
-                
-                async with aiosqlite.connect("db.sqlite3") as db:
-                    await db.execute("""
-                    INSERT OR IGNORE INTO invite_history (user_id, inviter_id, invite_code, date)
-                    VALUES (?, ?, ?, datetime('now'))
-                    """, (invite.inviter.id if invite.inviter else 0, 
-                          invite.inviter.id if invite.inviter else 0, 
-                          invite.code))
-                    await db.commit()
-                    
         except Exception as e:
             print(f"❌ Ошибка загрузки инвайтов для гильдии {guild.id}: {e}")
 
     print(f"✅ Бот запущен: {bot.user}")
     print(f"🎮 Команды доступны на сервере с ID: {GUILD_ID}")
     
-    await bot.change_presence(activity=discord.Game(name="/info | /shop"))
+    await bot.change_presence(activity=discord.Game(name="/help | /shop"))
+
+# ================== КОМАНДА /HELP ==================
+@bot.tree.command(name="help", description="Показать список всех доступных команд")
+async def help_command(interaction: discord.Interaction):
+    is_admin = interaction.user.guild_permissions.administrator
+    
+    embed = discord.Embed(
+        title="📚 Список команд",
+        description="Вот все доступные команды бота:",
+        color=discord.Color.blue()
+    )
+    
+    # Общие команды
+    embed.add_field(
+        name="📋 Общие команды",
+        value=(
+            "`/help` - Показать это меню\n"
+            "`/info` - Информация о сервисе\n"
+            "`/shop` - Открыть магазин\n"
+            "`/invites` - Ваша статистика приглашений\n"
+            "`/top` - Топ 10 инвайтеров"
+        ),
+        inline=False
+    )
+    
+    # Админ команды
+    if is_admin:
+        embed.add_field(
+            name="👑 Административные команды",
+            value=(
+                "`/giveinvites <user> <amount>` - Выдать инвайты пользователю\n"
+                "`/takeinvites <user> <amount>` - Забрать инвайты у пользователя\n"
+                "`/reset_user <user>` - Сбросить статистику пользователя\n"
+                "`/sync` - Синхронизировать команды\n"
+                "`/successful <order_number>` - Отметить заказ как выполненный"
+            ),
+            inline=False
+        )
+    
+    embed.set_footer(text="Бот для помощи с заданиями Discord")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# ================== КОМАНДА /SUCCESSFUL ==================
+@bot.tree.command(name="successful", description="Отметить заказ как выполненный (только для админов)")
+async def successful(interaction: discord.Interaction, order_number: int):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ У вас нет прав на использование этой команды!", ephemeral=True)
+        return
+    
+    async with aiosqlite.connect("db.sqlite3") as db:
+        cursor = await db.execute(
+            "SELECT user_id, item, message_id FROM orders WHERE order_number=? AND status='Ожидается'",
+            (order_number,)
+        )
+        order = await cursor.fetchone()
+        
+        if not order:
+            await interaction.response.send_message(f"❌ Заказ #{order_number} не найден или уже выполнен!", ephemeral=True)
+            return
+        
+        user_id, item, message_id = order
+        
+        # Обновляем статус в БД
+        await db.execute(
+            "UPDATE orders SET status='Выполнено' WHERE order_number=?",
+            (order_number,)
+        )
+        await db.commit()
+    
+    # Обновляем сообщение в канале заказов
+    orders_channel = bot.get_channel(ORDERS_CHANNEL_ID)
+    if orders_channel:
+        try:
+            message = await orders_channel.fetch_message(message_id)
+            embed = message.embeds[0] if message.embeds else None
+            if embed:
+                new_embed = discord.Embed(
+                    title=embed.title,
+                    description=embed.description,
+                    color=discord.Color.green()
+                )
+                for field in embed.fields:
+                    if field.name == "Статус":
+                        new_embed.add_field(name="Статус", value="✅ Выполнено", inline=field.inline)
+                    else:
+                        new_embed.add_field(name=field.name, value=field.value, inline=field.inline)
+                new_embed.set_footer(text=embed.footer.text)
+                await message.edit(embed=new_embed)
+        except:
+            pass
+    
+    embed = discord.Embed(
+        title="✅ Заказ выполнен!",
+        description=f"Заказ #{order_number} отмечен как выполненный",
+        color=discord.Color.green()
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ================== КОМАНДА /INFO ==================
 @bot.tree.command(name="info", description="Информация о сервисе помощи с заданиями")
@@ -418,7 +521,6 @@ async def on_member_join(member):
             used_invite = invite.code
             break
 
-    # Обновляем кэш
     new_cache = {}
     for invite in invites:
         new_cache[invite.code] = {
@@ -438,7 +540,6 @@ async def on_member_join(member):
 
     if inviter:
         async with aiosqlite.connect("db.sqlite3") as db:
-            # Обновляем статистику пригласившего
             await db.execute("""
             INSERT INTO users (user_id, invited, total_invites)
             VALUES (?, 1, 1)
@@ -447,13 +548,11 @@ async def on_member_join(member):
                 total_invites = total_invites + 1
             """, (inviter.id,))
 
-            # Записываем факт приглашения
             await db.execute(
                 "INSERT INTO joins (user_id, inviter_id, join_date) VALUES (?, ?, datetime('now'))",
                 (member.id, inviter.id)
             )
             
-            # Записываем историю инвайта
             await db.execute(
                 "INSERT INTO invite_history (user_id, inviter_id, invite_code, date) VALUES (?, ?, ?, datetime('now'))",
                 (member.id, inviter.id, used_invite)
@@ -634,11 +733,12 @@ class Shop(View):
             await interaction.response.send_message(f"❌ Недостаточно инвайтов! Нужно: {cost}, у вас: {valid}", ephemeral=True)
             return
 
+        # Создаем канал для тикета
         guild = interaction.guild
         category = discord.utils.get(guild.categories, id=TICKET_CATEGORY_ID)
         
         if not category:
-            await interaction.response.send_message("❌ Категория для тикетов не найдена! Обратитесь к администратору.", ephemeral=True)
+            await interaction.response.send_message("❌ Категория для тикетов не найдена!", ephemeral=True)
             return
 
         channel = await guild.create_text_channel(
@@ -649,9 +749,13 @@ class Shop(View):
         await channel.set_permissions(interaction.user, read_messages=True, send_messages=True)
         await channel.set_permissions(guild.default_role, read_messages=False)
 
+        # Получаем номер заказа
+        order_number = await get_next_order_number()
+        
+        # Создаем embed для тикет-канала
         embed = discord.Embed(
             title="🛒 Новый заказ",
-            description=f"**Товар:** {item_name}\n{item_description}\n**Цена:** {cost} инвайтов",
+            description=f"**Товар:** {item_name}\n{item_description}\n**Цена:** {cost} инвайтов\n**Номер заказа:** #{order_number}",
             color=discord.Color.green()
         )
         embed.set_footer(text=f"Заказчик: {interaction.user.name}")
@@ -662,18 +766,41 @@ class Shop(View):
             view=TicketView()
         )
 
+        # Отправляем заказ в общий канал заказов
+        orders_channel = bot.get_channel(ORDERS_CHANNEL_ID)
+        order_message = None
+        if orders_channel:
+            order_embed = discord.Embed(
+                title=f"📦 Заказ #{order_number}",
+                description=f"**Пользователь:** {interaction.user.mention}\n**Тег:** {interaction.user.name}\n**Заказано:** {item_name}\n**Цена:** {cost} инвайтов",
+                color=discord.Color.orange()
+            )
+            order_embed.add_field(name="Статус", value="⏳ Ожидается", inline=False)
+            order_embed.set_footer(text=f"ID: {interaction.user.id}")
+            
+            order_message = await orders_channel.send(embed=order_embed)
+        else:
+            print(f"❌ Канал с ID {ORDERS_CHANNEL_ID} не найден!")
+
+        # Сохраняем в БД
         async with aiosqlite.connect("db.sqlite3") as db:
             await db.execute("""
             UPDATE users SET spent = spent + ? WHERE user_id=?
             """, (cost, interaction.user.id))
 
             await db.execute(
-                "INSERT INTO purchases VALUES (?, ?, datetime('now'))",
-                (interaction.user.id, f"{item_name} ({cost} инвайтов)")
+                "INSERT INTO purchases (user_id, item, date, order_number) VALUES (?, ?, datetime('now'), ?)",
+                (interaction.user.id, f"{item_name} ({cost} инвайтов)", order_number)
             )
+            
+            await db.execute("""
+            INSERT INTO orders (order_number, user_id, item, status, message_id, created_at)
+            VALUES (?, ?, ?, 'Ожидается', ?, datetime('now'))
+            """, (order_number, interaction.user.id, item_name, order_message.id if order_message else 0))
 
             await db.commit()
 
+        # Выдача ролей
         buyer = discord.utils.get(guild.roles, name=BUYER_ROLE)
         regular = discord.utils.get(guild.roles, name=REGULAR_ROLE)
 
@@ -691,7 +818,7 @@ class Shop(View):
             await interaction.user.add_roles(regular)
 
         await interaction.response.send_message(
-            f"✅ Заказ создан! Перейдите в канал {channel.mention}",
+            f"✅ Заказ #{order_number} создан! Перейдите в канал {channel.mention}\nЗаказ отправлен в канал ожидания.",
             ephemeral=True
         )
 
@@ -736,6 +863,7 @@ async def reset_user(interaction: discord.Interaction, user: discord.Member):
         await db.execute("DELETE FROM purchases WHERE user_id=?", (user.id,))
         await db.execute("DELETE FROM joins WHERE user_id=? OR inviter_id=?", (user.id, user.id))
         await db.execute("DELETE FROM invite_history WHERE user_id=? OR inviter_id=?", (user.id, user.id))
+        await db.execute("DELETE FROM orders WHERE user_id=?", (user.id,))
         await db.commit()
     
     await interaction.response.send_message(f"✅ Статистика пользователя {user.mention} сброшена!", ephemeral=True)
@@ -743,10 +871,7 @@ async def reset_user(interaction: discord.Interaction, user: discord.Member):
 # ================== ЗАПУСК ==================
 if __name__ == "__main__":
     try:
-        # Запускаем keep-alive сервер
         keep_alive()
-        
-        # Запускаем бота
         bot.run(TOKEN)
     except discord.LoginFailure:
         print("❌ Ошибка: Неверный токен бота!")
