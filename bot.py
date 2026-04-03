@@ -45,6 +45,8 @@ ORDERS_CHANNEL_ID = 1372910944472006706
 BUYER_ROLE = "Покупатель"
 REGULAR_ROLE = "Постоянный покупатель"
 MIN_ACCOUNT_AGE_DAYS = 3
+OWNER_ROLE_ID = 1373760116678987916  # ID роли владельца
+TAG_ROLE_ID = 1489575333718921428    # ID роли для тега
 
 if not TOKEN:
     print("❌ ОШИБКА: Токен не найден!")
@@ -101,6 +103,14 @@ async def init_db():
             created_at TEXT
         )
         """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS user_stats (
+            user_id INTEGER PRIMARY KEY,
+            messages INTEGER DEFAULT 0,
+            join_date TEXT,
+            last_active TEXT
+        )
+        """)
         await db.commit()
 
 async def get_next_order_number():
@@ -131,9 +141,28 @@ async def migrate_db():
                 await db.execute("ALTER TABLE users ADD COLUMN total_invites INTEGER DEFAULT 0")
             except:
                 pass
+        
+        cursor = await db.execute("PRAGMA table_info(user_stats)")
+        columns = [column[1] for column in await cursor.fetchall()]
+        if "messages" not in columns:
+            try:
+                await db.execute("ALTER TABLE user_stats ADD COLUMN messages INTEGER DEFAULT 0")
+            except:
+                pass
+        if "join_date" not in columns:
+            try:
+                await db.execute("ALTER TABLE user_stats ADD COLUMN join_date TEXT")
+            except:
+                pass
+        if "last_active" not in columns:
+            try:
+                await db.execute("ALTER TABLE user_stats ADD COLUMN last_active TEXT")
+            except:
+                pass
+        
         await db.commit()
 
-# ================== СТАРТ ==================
+# ================== СОБЫТИЯ ==================
 @bot.event
 async def on_ready():
     await init_db()
@@ -147,7 +176,6 @@ async def on_ready():
     except Exception as e:
         print(f"❌ Ошибка синхронизации: {e}")
     
-    # Загружаем все инвайты в кэш
     for guild in bot.guilds:
         try:
             invites = await guild.invites()
@@ -163,6 +191,43 @@ async def on_ready():
 
     print(f"✅ Бот запущен: {bot.user}")
     await bot.change_presence(activity=discord.Game(name="/help | /shop"))
+
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+    
+    # Подсчёт сообщений для статистики
+    async with aiosqlite.connect("db.sqlite3") as db:
+        await db.execute("""
+        INSERT INTO user_stats (user_id, messages, last_active)
+        VALUES (?, 1, datetime('now'))
+        ON CONFLICT(user_id) DO UPDATE SET 
+            messages = messages + 1,
+            last_active = datetime('now')
+        """, (message.author.id,))
+        await db.commit()
+    
+    await bot.process_commands(message)
+
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    # Автоматическая выдача роли за тег
+    tag_role = after.guild.get_role(TAG_ROLE_ID)
+    if not tag_role:
+        return
+    
+    # Проверяем, есть ли у пользователя тег
+    has_tag = any(role.id == TAG_ROLE_ID for role in after.roles)
+    
+    if has_tag:
+        # Если есть тег - выдаём роль
+        target_role = after.guild.get_role(1489575333718921428)
+        if target_role and target_role not in after.roles:
+            await after.add_roles(target_role)
+            log_channel = bot.get_channel(LOG_CHANNEL_ID)
+            if log_channel:
+                await log_channel.send(f"🏷️ Пользователю {after.mention} выдана роль {target_role.mention} за наличие тега!")
 
 # ================== КОМАНДА /HELP ==================
 @bot.tree.command(name="help", description="Показать список всех доступных команд")
@@ -182,7 +247,8 @@ async def help_command(interaction: discord.Interaction):
             "`/info` - Информация о сервисе\n"
             "`/shop` - Открыть магазин\n"
             "`/invites` - Ваша статистика приглашений\n"
-            "`/top` - Топ 10 инвайтеров"
+            "`/top` - Топ 10 инвайтеров\n"
+            "`/server` - Статистика сервера"
         ),
         inline=False
     )
@@ -195,10 +261,122 @@ async def help_command(interaction: discord.Interaction):
                 "`/takeinvites <user> <amount>` - Забрать инвайты\n"
                 "`/reset_user <user>` - Сбросить статистику\n"
                 "`/sync` - Синхронизировать команды\n"
-                "`/successful <order_number>` - Отметить заказ выполненным"
+                "`/successful <order_number>` - Отметить заказ выполненным\n"
+                "`/stats <user>` - Полная статистика игрока"
             ),
             inline=False
         )
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# ================== КОМАНДА /STATS ==================
+@bot.tree.command(name="stats", description="Показать полную статистику пользователя (только для админов)")
+async def stats(interaction: discord.Interaction, user: discord.Member):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+        return
+    
+    async with aiosqlite.connect("db.sqlite3") as db:
+        # Данные из таблицы users (инвайты)
+        cursor = await db.execute("SELECT invited, left, spent, total_invites FROM users WHERE user_id=?", (user.id,))
+        user_data = await cursor.fetchone()
+        
+        if user_data:
+            invited, left, spent, total_invites = user_data
+            valid = invited - left - spent
+        else:
+            invited = left = spent = total_invites = 0
+            valid = 0
+        
+        # Данные из таблицы user_stats (сообщения)
+        cursor = await db.execute("SELECT messages, join_date, last_active FROM user_stats WHERE user_id=?", (user.id,))
+        stats_data = await cursor.fetchone()
+        
+        if stats_data:
+            messages = stats_data[0] if stats_data[0] else 0
+            join_date = stats_data[1] if stats_data[1] else "Неизвестно"
+            last_active = stats_data[2] if stats_data[2] else "Неизвестно"
+        else:
+            messages = 0
+            join_date = "Неизвестно"
+            last_active = "Неизвестно"
+        
+        # Покупки
+        cursor = await db.execute("SELECT item, date FROM purchases WHERE user_id=? ORDER BY date DESC LIMIT 5", (user.id,))
+        purchases = await cursor.fetchall()
+    
+    # Время на сервере
+    joined_at = user.joined_at
+    if joined_at:
+        days_on_server = (datetime.now(timezone.utc) - joined_at).days
+        joined_str = joined_at.strftime("%d.%m.%Y %H:%M")
+    else:
+        days_on_server = 0
+        joined_str = "Неизвестно"
+    
+    embed = discord.Embed(
+        title=f"📊 Полная статистика {user.name}",
+        color=discord.Color.purple()
+    )
+    embed.set_thumbnail(url=user.avatar.url if user.avatar else None)
+    
+    # Инвайты
+    embed.add_field(name="📥 Пригласил", value=f"{invited}", inline=True)
+    embed.add_field(name="📤 Вышли", value=f"{left}", inline=True)
+    embed.add_field(name="✅ Доступно", value=f"**{valid}**", inline=True)
+    embed.add_field(name="💸 Потрачено", value=f"{spent}", inline=True)
+    embed.add_field(name="📈 Всего инвайтов", value=f"{total_invites}", inline=True)
+    
+    # Активность
+    embed.add_field(name="💬 Сообщений", value=f"{messages}", inline=True)
+    embed.add_field(name="📅 На сервере", value=f"{days_on_server} дней", inline=True)
+    embed.add_field(name="🕐 Зашёл", value=joined_str, inline=True)
+    embed.add_field(name="🕒 Последняя активность", value=last_active[:16] if last_active != "Неизвестно" else last_active, inline=True)
+    
+    # Покупки
+    if purchases:
+        history = "\n".join([f"• {item} ({date[:10]})" for item, date in purchases])
+        embed.add_field(name="🛒 Последние покупки", value=history, inline=False)
+    else:
+        embed.add_field(name="🛒 Покупки", value="Нет покупок", inline=False)
+    
+    embed.set_footer(text=f"ID: {user.id}")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# ================== КОМАНДА /SERVER ==================
+@bot.tree.command(name="server", description="Показать статистику сервера")
+async def server(interaction: discord.Interaction):
+    guild = interaction.guild
+    
+    # Общее количество участников
+    total_members = guild.member_count
+    
+    # Количество людей с тегом (роль TAG_ROLE_ID)
+    tag_role = guild.get_role(TAG_ROLE_ID)
+    tag_count = len(tag_role.members) if tag_role else 0
+    
+    # Владельцы (с ролью OWNER_ROLE_ID)
+    owner_role = guild.get_role(OWNER_ROLE_ID)
+    owners = owner_role.members if owner_role else []
+    owners_list = "\n".join([f"• {owner.mention}" for owner in owners]) if owners else "Не найдены"
+    
+    # Создатель сервера
+    creator = guild.owner.mention if guild.owner else "Неизвестно"
+    
+    embed = discord.Embed(
+        title=f"📊 Статистика сервера {guild.name}",
+        color=discord.Color.gold()
+    )
+    embed.set_thumbnail(url=guild.icon.url if guild.icon else None)
+    
+    embed.add_field(name="👥 Всего участников", value=f"{total_members}", inline=True)
+    embed.add_field(name="🏷️ С тегом", value=f"{tag_count}", inline=True)
+    embed.add_field(name="👑 Создатель", value=creator, inline=True)
+    
+    embed.add_field(name="👔 Владельцы", value=owners_list, inline=False)
+    
+    embed.add_field(name="📅 Сервер создан", value=guild.created_at.strftime("%d.%m.%Y"), inline=True)
+    embed.add_field(name="🔰 Уровень буста", value=guild.premium_tier, inline=True)
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -265,7 +443,7 @@ async def info(interaction: discord.Interaction):
     
     embed.add_field(
         name="⭐ Что мы даем?",
-        value="• Украшения профиля\n• Orbs (валюта Discord)\n• Награды за выполнение заданий",
+        value="• Украшения профиля\n• Orbs (валюта Discord)\n• Награды за выполнение заданий\n• Значки HypeSquad\n• Значок зелёного листочка",
         inline=False
     )
     
@@ -277,7 +455,9 @@ async def info(interaction: discord.Interaction):
             "🩷 2 задания (1400 Orbs) - **5 инвайтов**\n"
             "🟡 Все задания - **10 инвайтов**\n"
             "🎁 Nitro Full (3 дня) - **5 инвайтов**\n"
-            "🟠 1 задание (200 Orbs) - **2 инвайта**"
+            "🟠 1 задание (200 Orbs) - **2 инвайта**\n"
+            "🎨 Значок HypeSquad (3 цвета на выбор) - **1 инвайт**\n"
+            "🍃 Новый значок зелёного листочка - **2 инвайта**"
         ),
         inline=False
     )
@@ -377,7 +557,7 @@ def is_fake(member):
     age = datetime.now(timezone.utc) - member.created_at
     return age < timedelta(days=MIN_ACCOUNT_AGE_DAYS)
 
-# ================== ВХОД (ПЕРЕПИСАН) ==================
+# ================== ВХОД ==================
 @bot.event
 async def on_member_join(member):
     guild = member.guild
@@ -385,14 +565,12 @@ async def on_member_join(member):
     if guild.id not in invites_cache:
         invites_cache[guild.id] = {}
     
-    # Получаем текущие инвайты
     invites = await guild.invites()
     old = invites_cache[guild.id]
     
     inviter = None
     used_invite = None
     
-    # Ищем использованный инвайт
     for invite in invites:
         old_uses = 0
         if invite.code in old:
@@ -404,10 +582,8 @@ async def on_member_join(member):
         if invite.uses > old_uses:
             inviter = invite.inviter
             used_invite = invite.code
-            print(f"🔍 Найден инвайт: {invite.code} (было {old_uses}, стало {invite.uses})")
             break
     
-    # Обновляем кэш
     new_cache = {}
     for invite in invites:
         new_cache[invite.code] = {'uses': invite.uses, 'inviter': invite.inviter.id if invite.inviter else None}
@@ -417,16 +593,23 @@ async def on_member_join(member):
     if not channel:
         return
     
+    # Сохраняем дату входа в user_stats
+    async with aiosqlite.connect("db.sqlite3") as db:
+        await db.execute("""
+        INSERT INTO user_stats (user_id, join_date)
+        VALUES (?, datetime('now'))
+        ON CONFLICT(user_id) DO UPDATE SET join_date = datetime('now')
+        """, (member.id,))
+        await db.commit()
+    
     if is_fake(member):
         await channel.send(f"⚠️ {member.mention} подозрительный аккаунт - не засчитан")
         return
     
     if inviter:
         async with aiosqlite.connect("db.sqlite3") as db:
-            # Проверяем, не заходил ли уже этот пользователь
             cursor = await db.execute("SELECT inviter_id FROM joins WHERE user_id=?", (member.id,))
             if not await cursor.fetchone():
-                # Увеличиваем счетчик пригласившего
                 await db.execute("""
                 INSERT INTO users (user_id, invited, total_invites)
                 VALUES (?, 1, 1)
@@ -435,12 +618,10 @@ async def on_member_join(member):
                     total_invites = total_invites + 1
                 """, (inviter.id,))
                 
-                # Записываем факт приглашения
                 await db.execute("INSERT INTO joins (user_id, inviter_id, join_date) VALUES (?, ?, datetime('now'))", (member.id, inviter.id))
                 await db.execute("INSERT INTO invite_history (user_id, inviter_id, invite_code, date) VALUES (?, ?, ?, datetime('now'))", (member.id, inviter.id, used_invite))
                 await db.commit()
                 
-                # Получаем актуальное количество
                 cursor = await db.execute("SELECT invited, left, spent FROM users WHERE user_id=?", (inviter.id,))
                 inv_data = await cursor.fetchone()
                 if inv_data:
@@ -643,6 +824,14 @@ class Shop(View):
     @discord.ui.button(label="🟠 1 задание (200 Orbs) - 2 инвайта", style=discord.ButtonStyle.blurple)
     async def b6(self, interaction: discord.Interaction, button: Button):
         await self.process(interaction, 2, "1 задание (200 Orbs)", "Выполнение одного задания Discord за 💎 200 Orbs")
+    
+    @discord.ui.button(label="🎨 Значок HypeSquad - 1 инвайт", style=discord.ButtonStyle.blurple)
+    async def b7(self, interaction: discord.Interaction, button: Button):
+        await self.process(interaction, 1, "Значок HypeSquad (3 цвета на выбор)", "Выдача значка HypeSquad (Brilliance/Bravery/Balance на выбор)")
+    
+    @discord.ui.button(label="🍃 Значок зелёного листочка - 2 инвайта", style=discord.ButtonStyle.green)
+    async def b8(self, interaction: discord.Interaction, button: Button):
+        await self.process(interaction, 2, "Значок зелёного листочка", "Выдача эксклюзивного значка зелёного листочка")
 
 # ================== /SHOP ==================
 @bot.tree.command(name="shop", description="Открыть магазин")
@@ -659,6 +848,8 @@ async def shop(interaction: discord.Interaction):
     embed.add_field(name="🟡 Все задания", value="**Цена:** 10 инвайтов", inline=False)
     embed.add_field(name="🎁 Nitro Full (3 дня)", value="**Цена:** 5 инвайтов", inline=False)
     embed.add_field(name="🟠 1 задание (200 Orbs)", value="**Цена:** 2 инвайта", inline=False)
+    embed.add_field(name="🎨 Значок HypeSquad", value="**Цена:** 1 инвайт (3 цвета на выбор)", inline=False)
+    embed.add_field(name="🍃 Значок зелёного листочка", value="**Цена:** 2 инвайта", inline=False)
     
     embed.set_footer(text="💰 Оплата вашими приглашениями | /invites - проверить баланс")
     
@@ -678,6 +869,7 @@ async def reset_user(interaction: discord.Interaction, user: discord.Member):
         await db.execute("DELETE FROM joins WHERE user_id=? OR inviter_id=?", (user.id, user.id))
         await db.execute("DELETE FROM invite_history WHERE user_id=? OR inviter_id=?", (user.id, user.id))
         await db.execute("DELETE FROM orders WHERE user_id=?", (user.id,))
+        await db.execute("DELETE FROM user_stats WHERE user_id=?", (user.id,))
         await db.commit()
     
     await interaction.response.send_message(f"✅ Статистика пользователя {user.mention} сброшена!", ephemeral=True)
