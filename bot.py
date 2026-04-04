@@ -9,6 +9,8 @@ from flask import Flask, jsonify
 from threading import Thread
 import logging
 import random
+from typing import Dict, Optional, List
+from discord import app_commands
 
 # ================== FLASK ДЛЯ KEEP-ALIVE ==================
 app = Flask('')
@@ -45,8 +47,15 @@ ORDERS_CHANNEL_ID = 1372910944472006706
 BUYER_ROLE = "Покупатель"
 REGULAR_ROLE = "Постоянный покупатель"
 MIN_ACCOUNT_AGE_DAYS = 3
-OWNER_ROLE_ID = 1373760116678987916  # ID роли владельца
-TAG_ROLE_ID = 1489575333718921428    # ID роли для тега
+OWNER_ROLE_ID = 1373760116678987916
+TAG_ROLE_ID = 1489575333718921428
+
+# Конфиг для розыгрышей и игр
+REVIEW_CHANNEL_ID = int(os.getenv("REVIEW_CHANNEL_ID", 1372671847690272789))
+GUESS_CHANNEL_ID = int(os.getenv("GUESS_CHANNEL_ID", 1484247093299118262))
+WINNER_CHANNEL_ID = int(os.getenv("WINNER_CHANNEL_ID", 1372910944472006706))
+ALLOWED_ROLE_ID = int(os.getenv("ALLOWED_ROLE_ID", 1490014283164160201))
+REVIEW_COUNTER_START = int(os.getenv("REVIEW_COUNTER_START", 347))
 
 if not TOKEN:
     print("❌ ОШИБКА: Токен не найден!")
@@ -55,10 +64,15 @@ if not TOKEN:
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# Кэши и переменные
 invites_cache = {}
-order_counter = 496
+order_counter = 533
+active_giveaways: Dict[str, dict] = {}
+active_guess_games: Dict[int, dict] = {}
+user_invites: Dict[int, int] = {}
+review_counter = REVIEW_COUNTER_START
 
-# ================== БАЗА ==================
+# ================== БАЗА ДАННЫХ ==================
 async def init_db():
     async with aiosqlite.connect("db.sqlite3") as db:
         await db.execute("""
@@ -162,496 +176,17 @@ async def migrate_db():
         
         await db.commit()
 
-# ================== СОБЫТИЯ ==================
-@bot.event
-async def on_ready():
-    await init_db()
-    await migrate_db()
-    
-    try:
-        guild = discord.Object(id=GUILD_ID)
-        bot.tree.copy_global_to(guild=guild)
-        synced = await bot.tree.sync(guild=guild)
-        print(f"✅ Синхронизировано {len(synced)} команд")
-    except Exception as e:
-        print(f"❌ Ошибка синхронизации: {e}")
-    
-    for guild in bot.guilds:
-        try:
-            invites = await guild.invites()
-            invites_cache[guild.id] = {}
-            for invite in invites:
-                invites_cache[guild.id][invite.code] = {
-                    'uses': invite.uses,
-                    'inviter': invite.inviter.id if invite.inviter else None
-                }
-            print(f"📊 Загружено {len(invites)} инвайтов")
-        except Exception as e:
-            print(f"❌ Ошибка загрузки инвайтов: {e}")
+# ================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================
+def has_permission(interaction: discord.Interaction) -> bool:
+    if interaction.user.guild_permissions.administrator:
+        return True
+    role = discord.utils.get(interaction.user.roles, id=ALLOWED_ROLE_ID)
+    return role is not None
 
-    print(f"✅ Бот запущен: {bot.user}")
-    await bot.change_presence(activity=discord.Game(name="/help | /shop"))
-
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        return
-    
-    # Подсчёт сообщений для статистики
-    async with aiosqlite.connect("db.sqlite3") as db:
-        await db.execute("""
-        INSERT INTO user_stats (user_id, messages, last_active)
-        VALUES (?, 1, datetime('now'))
-        ON CONFLICT(user_id) DO UPDATE SET 
-            messages = messages + 1,
-            last_active = datetime('now')
-        """, (message.author.id,))
-        await db.commit()
-    
-    await bot.process_commands(message)
-
-@bot.event
-async def on_member_update(before: discord.Member, after: discord.Member):
-    # Автоматическая выдача роли за тег
-    tag_role = after.guild.get_role(TAG_ROLE_ID)
-    if not tag_role:
-        return
-    
-    # Проверяем, есть ли у пользователя тег
-    has_tag = any(role.id == TAG_ROLE_ID for role in after.roles)
-    
-    if has_tag:
-        # Если есть тег - выдаём роль
-        target_role = after.guild.get_role(1489575333718921428)
-        if target_role and target_role not in after.roles:
-            await after.add_roles(target_role)
-            log_channel = bot.get_channel(LOG_CHANNEL_ID)
-            if log_channel:
-                await log_channel.send(f"🏷️ Пользователю {after.mention} выдана роль {target_role.mention} за наличие тега!")
-
-# ================== КОМАНДА /HELP ==================
-@bot.tree.command(name="help", description="Показать список всех доступных команд")
-async def help_command(interaction: discord.Interaction):
-    is_admin = interaction.user.guild_permissions.administrator
-    
-    embed = discord.Embed(
-        title="📚 Список команд",
-        description="Вот все доступные команды бота:",
-        color=discord.Color.blue()
-    )
-    
-    embed.add_field(
-        name="📋 Общие команды",
-        value=(
-            "`/help` - Показать это меню\n"
-            "`/info` - Информация о сервисе\n"
-            "`/shop` - Открыть магазин\n"
-            "`/invites` - Ваша статистика приглашений\n"
-            "`/top` - Топ 10 инвайтеров\n"
-            "`/server` - Статистика сервера"
-        ),
-        inline=False
-    )
-    
-    if is_admin:
-        embed.add_field(
-            name="👑 Административные команды",
-            value=(
-                "`/giveinvites <user> <amount>` - Выдать инвайты\n"
-                "`/takeinvites <user> <amount>` - Забрать инвайты\n"
-                "`/reset_user <user>` - Сбросить статистику\n"
-                "`/sync` - Синхронизировать команды\n"
-                "`/successful <order_number>` - Отметить заказ выполненным\n"
-                "`/stats <user>` - Полная статистика игрока"
-            ),
-            inline=False
-        )
-    
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-# ================== КОМАНДА /STATS ==================
-@bot.tree.command(name="stats", description="Показать полную статистику пользователя (только для админов)")
-async def stats(interaction: discord.Interaction, user: discord.Member):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
-        return
-    
-    async with aiosqlite.connect("db.sqlite3") as db:
-        # Данные из таблицы users (инвайты)
-        cursor = await db.execute("SELECT invited, left, spent, total_invites FROM users WHERE user_id=?", (user.id,))
-        user_data = await cursor.fetchone()
-        
-        if user_data:
-            invited, left, spent, total_invites = user_data
-            valid = invited - left - spent
-        else:
-            invited = left = spent = total_invites = 0
-            valid = 0
-        
-        # Данные из таблицы user_stats (сообщения)
-        cursor = await db.execute("SELECT messages, join_date, last_active FROM user_stats WHERE user_id=?", (user.id,))
-        stats_data = await cursor.fetchone()
-        
-        if stats_data:
-            messages = stats_data[0] if stats_data[0] else 0
-            join_date = stats_data[1] if stats_data[1] else "Неизвестно"
-            last_active = stats_data[2] if stats_data[2] else "Неизвестно"
-        else:
-            messages = 0
-            join_date = "Неизвестно"
-            last_active = "Неизвестно"
-        
-        # Покупки
-        cursor = await db.execute("SELECT item, date FROM purchases WHERE user_id=? ORDER BY date DESC LIMIT 5", (user.id,))
-        purchases = await cursor.fetchall()
-    
-    # Время на сервере
-    joined_at = user.joined_at
-    if joined_at:
-        days_on_server = (datetime.now(timezone.utc) - joined_at).days
-        joined_str = joined_at.strftime("%d.%m.%Y %H:%M")
-    else:
-        days_on_server = 0
-        joined_str = "Неизвестно"
-    
-    embed = discord.Embed(
-        title=f"📊 Полная статистика {user.name}",
-        color=discord.Color.purple()
-    )
-    embed.set_thumbnail(url=user.avatar.url if user.avatar else None)
-    
-    # Инвайты
-    embed.add_field(name="📥 Пригласил", value=f"{invited}", inline=True)
-    embed.add_field(name="📤 Вышли", value=f"{left}", inline=True)
-    embed.add_field(name="✅ Доступно", value=f"**{valid}**", inline=True)
-    embed.add_field(name="💸 Потрачено", value=f"{spent}", inline=True)
-    embed.add_field(name="📈 Всего инвайтов", value=f"{total_invites}", inline=True)
-    
-    # Активность
-    embed.add_field(name="💬 Сообщений", value=f"{messages}", inline=True)
-    embed.add_field(name="📅 На сервере", value=f"{days_on_server} дней", inline=True)
-    embed.add_field(name="🕐 Зашёл", value=joined_str, inline=True)
-    embed.add_field(name="🕒 Последняя активность", value=last_active[:16] if last_active != "Неизвестно" else last_active, inline=True)
-    
-    # Покупки
-    if purchases:
-        history = "\n".join([f"• {item} ({date[:10]})" for item, date in purchases])
-        embed.add_field(name="🛒 Последние покупки", value=history, inline=False)
-    else:
-        embed.add_field(name="🛒 Покупки", value="Нет покупок", inline=False)
-    
-    embed.set_footer(text=f"ID: {user.id}")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-# ================== КОМАНДА /SERVER ==================
-@bot.tree.command(name="server", description="Показать статистику сервера")
-async def server(interaction: discord.Interaction):
-    guild = interaction.guild
-    
-    # Общее количество участников
-    total_members = guild.member_count
-    
-    # Количество людей с тегом (роль TAG_ROLE_ID)
-    tag_role = guild.get_role(TAG_ROLE_ID)
-    tag_count = len(tag_role.members) if tag_role else 0
-    
-    # Владельцы (с ролью OWNER_ROLE_ID)
-    owner_role = guild.get_role(OWNER_ROLE_ID)
-    owners = owner_role.members if owner_role else []
-    owners_list = "\n".join([f"• {owner.mention}" for owner in owners]) if owners else "Не найдены"
-    
-    # Создатель сервера
-    creator = guild.owner.mention if guild.owner else "Неизвестно"
-    
-    embed = discord.Embed(
-        title=f"📊 Статистика сервера {guild.name}",
-        color=discord.Color.gold()
-    )
-    embed.set_thumbnail(url=guild.icon.url if guild.icon else None)
-    
-    embed.add_field(name="👥 Всего участников", value=f"{total_members}", inline=True)
-    embed.add_field(name="🏷️ С тегом", value=f"{tag_count}", inline=True)
-    embed.add_field(name="👑 Создатель", value=creator, inline=True)
-    
-    embed.add_field(name="👔 Владельцы", value=owners_list, inline=False)
-    
-    embed.add_field(name="📅 Сервер создан", value=guild.created_at.strftime("%d.%m.%Y"), inline=True)
-    embed.add_field(name="🔰 Уровень буста", value=guild.premium_tier, inline=True)
-    
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-# ================== КОМАНДА /SUCCESSFUL ==================
-@bot.tree.command(name="successful", description="Отметить заказ как выполненный (только для админов)")
-async def successful(interaction: discord.Interaction, order_number: int):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
-        return
-    
-    async with aiosqlite.connect("db.sqlite3") as db:
-        cursor = await db.execute(
-            "SELECT user_id, item, message_id FROM orders WHERE order_number=? AND status='Ожидается'",
-            (order_number,)
-        )
-        order = await cursor.fetchone()
-        
-        if not order:
-            await interaction.response.send_message(f"❌ Заказ #{order_number} не найден или уже выполнен!", ephemeral=True)
-            return
-        
-        user_id, item, message_id = order
-        await db.execute("UPDATE orders SET status='Выполнено' WHERE order_number=?", (order_number,))
-        await db.commit()
-    
-    orders_channel = bot.get_channel(ORDERS_CHANNEL_ID)
-    if orders_channel:
-        try:
-            message = await orders_channel.fetch_message(message_id)
-            embed = message.embeds[0] if message.embeds else None
-            if embed:
-                new_embed = discord.Embed(
-                    title=embed.title,
-                    description=embed.description,
-                    color=discord.Color.green()
-                )
-                for field in embed.fields:
-                    if field.name == "Статус":
-                        new_embed.add_field(name="Статус", value="✅ Выполнено", inline=field.inline)
-                    else:
-                        new_embed.add_field(name=field.name, value=field.value, inline=field.inline)
-                new_embed.set_footer(text=embed.footer.text)
-                await message.edit(embed=new_embed)
-        except:
-            pass
-    
-    embed = discord.Embed(title="✅ Заказ выполнен!", description=f"Заказ #{order_number} отмечен как выполненный", color=discord.Color.green())
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-# ================== КОМАНДА /INFO ==================
-@bot.tree.command(name="info", description="Информация о сервисе помощи с заданиями")
-async def info(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="👑 Информация о сервисе помощи с заданиями",
-        description="Добро пожаловать! 👑",
-        color=discord.Color.purple()
-    )
-    
-    embed.add_field(
-        name="🤝 О нас",
-        value="Мы помогаем участникам выполнять задания Discord!",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="⭐ Что мы даем?",
-        value="• Украшения профиля\n• Orbs (валюта Discord)\n• Награды за выполнение заданий\n• Значки HypeSquad\n• Значок зелёного листочка",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="💰 Прайс-лист",
-        value=(
-            "🟠 1 задание (700 Orbs) - **3 инвайта**\n"
-            "🔵 Задание с украшением - **3 инвайта**\n"
-            "🩷 2 задания (1400 Orbs) - **5 инвайтов**\n"
-            "🟡 Все задания - **10 инвайтов**\n"
-            "🎁 Nitro Full (3 дня) - **5 инвайтов**\n"
-            "🟠 1 задание (200 Orbs) - **2 инвайта**\n"
-            "🎨 Значок HypeSquad (3 цвета на выбор) - **1 инвайт**\n"
-            "🍃 Новый значок зелёного листочка - **2 инвайта**"
-        ),
-        inline=False
-    )
-    
-    embed.add_field(
-        name="⚠️ Гарантии",
-        value="• Безопасность\n• Быстрое выполнение\n• Поддержка 24/7",
-        inline=False
-    )
-    
-    embed.add_field(name="📞 Как заказать?", value="Используйте команду `/shop`!", inline=False)
-    embed.set_footer(text="Ваши инвайты = ваши награды")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-# ================== КОМАНДА /GIVEINVITES ==================
-@bot.tree.command(name="giveinvites", description="Выдать инвайты пользователю (только для админов)")
-async def giveinvites(interaction: discord.Interaction, user: discord.Member, amount: int):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
-        return
-    
-    if amount <= 0:
-        await interaction.response.send_message("❌ Количество должно быть положительным!", ephemeral=True)
-        return
-    
-    async with aiosqlite.connect("db.sqlite3") as db:
-        await db.execute("""
-        INSERT INTO users (user_id, invited, total_invites)
-        VALUES (?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET 
-            invited = invited + ?,
-            total_invites = total_invites + ?
-        """, (user.id, amount, amount, amount, amount))
-        await db.commit()
-    
-    embed = discord.Embed(title="✅ Инвайты выданы!", description=f"{user.mention} выдано **{amount}** инвайтов!", color=discord.Color.green())
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-    
-    log_channel = bot.get_channel(LOG_CHANNEL_ID)
-    if log_channel:
-        await log_channel.send(f"📊 {interaction.user.name} выдал {amount} инвайтов {user.mention}")
-
-# ================== КОМАНДА /TAKEINVITES ==================
-@bot.tree.command(name="takeinvites", description="Забрать инвайты у пользователя (только для админов)")
-async def takeinvites(interaction: discord.Interaction, user: discord.Member, amount: int):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
-        return
-    
-    if amount <= 0:
-        await interaction.response.send_message("❌ Количество должно быть положительным!", ephemeral=True)
-        return
-    
-    async with aiosqlite.connect("db.sqlite3") as db:
-        cursor = await db.execute("SELECT invited, left, spent FROM users WHERE user_id=?", (user.id,))
-        data = await cursor.fetchone()
-        
-        if data:
-            invited, left, spent = data
-            current_valid = invited - left - spent
-            
-            if current_valid < amount:
-                await interaction.response.send_message(f"❌ У {user.mention} всего {current_valid} инвайтов!", ephemeral=True)
-                return
-            
-            await db.execute("UPDATE users SET spent = spent + ? WHERE user_id=?", (amount, user.id))
-            await db.commit()
-            
-            embed = discord.Embed(title="📤 Инвайты забраны!", description=f"У {user.mention} забрано **{amount}** инвайтов!\nОсталось: {current_valid - amount}", color=discord.Color.orange())
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            
-            log_channel = bot.get_channel(LOG_CHANNEL_ID)
-            if log_channel:
-                await log_channel.send(f"📊 {interaction.user.name} забрал {amount} инвайтов у {user.mention}")
-        else:
-            await interaction.response.send_message(f"❌ У {user.mention} нет инвайтов!", ephemeral=True)
-
-# ================== КОМАНДА /SYNC ==================
-@bot.tree.command(name="sync", description="Синхронизировать команды (только для админов)")
-async def sync_commands(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
-        return
-    
-    await interaction.response.defer(ephemeral=True)
-    
-    try:
-        guild = discord.Object(id=GUILD_ID)
-        bot.tree.copy_global_to(guild=guild)
-        synced = await bot.tree.sync(guild=guild)
-        await interaction.followup.send(f"✅ Синхронизировано {len(synced)} команд")
-    except Exception as e:
-        await interaction.followup.send(f"❌ Ошибка: {e}")
-
-# ================== АНТИ-ФЕЙК ==================
 def is_fake(member):
     age = datetime.now(timezone.utc) - member.created_at
     return age < timedelta(days=MIN_ACCOUNT_AGE_DAYS)
 
-# ================== ВХОД ==================
-@bot.event
-async def on_member_join(member):
-    guild = member.guild
-    
-    if guild.id not in invites_cache:
-        invites_cache[guild.id] = {}
-    
-    invites = await guild.invites()
-    old = invites_cache[guild.id]
-    
-    inviter = None
-    used_invite = None
-    
-    for invite in invites:
-        old_uses = 0
-        if invite.code in old:
-            if isinstance(old[invite.code], dict):
-                old_uses = old[invite.code].get('uses', 0)
-            else:
-                old_uses = old[invite.code]
-        
-        if invite.uses > old_uses:
-            inviter = invite.inviter
-            used_invite = invite.code
-            break
-    
-    new_cache = {}
-    for invite in invites:
-        new_cache[invite.code] = {'uses': invite.uses, 'inviter': invite.inviter.id if invite.inviter else None}
-    invites_cache[guild.id] = new_cache
-    
-    channel = bot.get_channel(LOG_CHANNEL_ID)
-    if not channel:
-        return
-    
-    # Сохраняем дату входа в user_stats
-    async with aiosqlite.connect("db.sqlite3") as db:
-        await db.execute("""
-        INSERT INTO user_stats (user_id, join_date)
-        VALUES (?, datetime('now'))
-        ON CONFLICT(user_id) DO UPDATE SET join_date = datetime('now')
-        """, (member.id,))
-        await db.commit()
-    
-    if is_fake(member):
-        await channel.send(f"⚠️ {member.mention} подозрительный аккаунт - не засчитан")
-        return
-    
-    if inviter:
-        async with aiosqlite.connect("db.sqlite3") as db:
-            cursor = await db.execute("SELECT inviter_id FROM joins WHERE user_id=?", (member.id,))
-            if not await cursor.fetchone():
-                await db.execute("""
-                INSERT INTO users (user_id, invited, total_invites)
-                VALUES (?, 1, 1)
-                ON CONFLICT(user_id) DO UPDATE SET 
-                    invited = invited + 1,
-                    total_invites = total_invites + 1
-                """, (inviter.id,))
-                
-                await db.execute("INSERT INTO joins (user_id, inviter_id, join_date) VALUES (?, ?, datetime('now'))", (member.id, inviter.id))
-                await db.execute("INSERT INTO invite_history (user_id, inviter_id, invite_code, date) VALUES (?, ?, ?, datetime('now'))", (member.id, inviter.id, used_invite))
-                await db.commit()
-                
-                cursor = await db.execute("SELECT invited, left, spent FROM users WHERE user_id=?", (inviter.id,))
-                inv_data = await cursor.fetchone()
-                if inv_data:
-                    total_valid = inv_data[0] - inv_data[1] - inv_data[2]
-                    await channel.send(f"👤 {member.mention} зашел\n📨 Пригласил: {inviter.mention}\n📊 Теперь у {inviter.name} {total_valid} инвайтов")
-            else:
-                await channel.send(f"👤 {member.mention} зашел\n📨 Пригласил: {inviter.mention}\n⚠️ Но этот пользователь уже заходил ранее - инвайт не засчитан")
-    else:
-        await channel.send(f"👤 {member.mention} зашел\n📨 Пригласил: Неизвестно")
-
-# ================== ВЫХОД ==================
-@bot.event
-async def on_member_remove(member):
-    async with aiosqlite.connect("db.sqlite3") as db:
-        cursor = await db.execute("SELECT inviter_id FROM joins WHERE user_id=? ORDER BY join_date DESC LIMIT 1", (member.id,))
-        data = await cursor.fetchone()
-        if data:
-            inviter_id = data[0]
-            await db.execute("UPDATE users SET left = left + 1 WHERE user_id=?", (inviter_id,))
-            await db.commit()
-            
-            channel = bot.get_channel(LOG_CHANNEL_ID)
-            if channel:
-                try:
-                    inviter = await bot.fetch_user(inviter_id)
-                    await channel.send(f"👋 {member.mention} покинул сервер\n📊 У {inviter.name} засчитан выход")
-                except:
-                    await channel.send(f"👋 {member.mention} покинул сервер\n📊 У пригласившего (ID: {inviter_id}) засчитан выход")
-
-# ================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================
 async def get_invites_count(user_id):
     async with aiosqlite.connect("db.sqlite3") as db:
         cursor = await db.execute("SELECT invited, left, spent FROM users WHERE user_id=?", (user_id,))
@@ -660,64 +195,331 @@ async def get_invites_count(user_id):
         return data[0] - data[1] - data[2]
     return 0
 
-# ================== /INVITES ==================
-@bot.tree.command(name="invites", description="Показать статистику ваших приглашений")
-async def invites(interaction: discord.Interaction):
-    async with aiosqlite.connect("db.sqlite3") as db:
-        cursor = await db.execute("SELECT invited, left, spent, total_invites FROM users WHERE user_id=?", (interaction.user.id,))
-        data = await cursor.fetchone()
+# ================== РОЗЫГРЫШИ ==================
+def build_giveaway_message(giveaway: dict, user_id: Optional[int] = None):
+    embed = discord.Embed(
+        title=f"🎁 {giveaway['prize']}",
+        description=giveaway["description"],
+        color=discord.Color.gold(),
+        timestamp=giveaway["end_time"]
+    )
+    
+    remaining = giveaway["end_time"] - datetime.now()
+    if remaining.total_seconds() > 0:
+        days = remaining.days
+        hours = remaining.seconds // 3600
+        minutes = (remaining.seconds % 3600) // 60
         
-        if data:
-            invited, left, spent, total_invites = data
-            valid = invited - left - spent
+        if days > 0:
+            time_str = f"{days}д {hours}ч"
+        elif hours > 0:
+            time_str = f"{hours}ч {minutes}м"
         else:
-            invited = left = spent = total_invites = 0
-            valid = 0
-        
-        cursor = await db.execute("SELECT item, date FROM purchases WHERE user_id=? ORDER BY date DESC LIMIT 10", (interaction.user.id,))
-        purchases = await cursor.fetchall()
+            time_str = f"{minutes}м"
+        embed.add_field(name="⏰ Окончание", value=time_str, inline=True)
+    else:
+        embed.add_field(name="⏰ Окончание", value="Завершён", inline=True)
     
-    embed = discord.Embed(title=f"📊 Статистика {interaction.user.name}", color=discord.Color.blue())
-    embed.add_field(name="✅ Доступно", value=f"**{valid}**", inline=True)
-    embed.add_field(name="📥 Пригласил", value=f"{invited}", inline=True)
-    embed.add_field(name="📤 Вышли", value=f"{left}", inline=True)
-    embed.add_field(name="💸 Потрачено", value=f"{spent}", inline=True)
-    embed.add_field(name="📈 Всего инвайтов", value=f"{total_invites}", inline=True)
+    embed.add_field(name="👤 Создал", value=giveaway["creator_name"], inline=True)
+    embed.add_field(name="👥 Участников", value=str(len(giveaway["participants"])), inline=True)
+    embed.add_field(name="🏆 Победителей", value=str(giveaway["winners_count"]), inline=True)
     
-    if purchases:
-        history = "\n".join([f"• {item} ({date[:10]})" for item, date in purchases])
-        embed.add_field(name="🛒 Последние покупки", value=history, inline=False)
+    embed.set_footer(text="🎁 +10% шанс за каждого приглашённого друга!")
     
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    view = GiveawayView(giveaway)
+    return embed, view
 
-# ================== ТОП ==================
-@bot.tree.command(name="top", description="Топ 10 пользователей по приглашениям")
-async def top(interaction: discord.Interaction):
-    async with aiosqlite.connect("db.sqlite3") as db:
-        cursor = await db.execute("""
-        SELECT user_id, invited - left - spent as total
-        FROM users WHERE invited - left - spent > 0
-        ORDER BY total DESC LIMIT 10
-        """)
-        data = await cursor.fetchall()
+class GiveawayView(discord.ui.View):
+    def __init__(self, giveaway: dict):
+        super().__init__(timeout=None)
+        self.giveaway = giveaway
     
-    if not data:
-        await interaction.response.send_message("📊 Пока нет пользователей с приглашениями!", ephemeral=True)
-        return
+    @discord.ui.button(label="✅ Участвовать", style=discord.ButtonStyle.success, custom_id="giveaway_join")
+    async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        key = f"{interaction.channel.id}_{self.giveaway['message_id']}"
+        
+        if key not in active_giveaways:
+            await interaction.response.send_message("❌ Розыгрыш уже завершён", ephemeral=True)
+            return
+        
+        giveaway = active_giveaways[key]
+        
+        if interaction.user.id in giveaway["participants"]:
+            await interaction.response.send_message("⚠️ Вы уже участвуете!", ephemeral=True)
+            return
+        
+        if datetime.now() > giveaway["end_time"]:
+            await interaction.response.send_message("❌ Розыгрыш уже закончился", ephemeral=True)
+            return
+        
+        giveaway["participants"].append(interaction.user.id)
+        
+        invite_bonus = await get_invites_count(interaction.user.id)
+        giveaway["invite_bonus"][interaction.user.id] = invite_bonus
+        
+        embed, _ = build_giveaway_message(giveaway, None)
+        message = await interaction.channel.fetch_message(giveaway["message_id"])
+        await message.edit(embed=embed)
+        
+        await interaction.response.send_message("✅ Вы участвуете в розыгрыше!", ephemeral=True)
     
-    embed = discord.Embed(title="🏆 ТОП 10 ИНВАЙТЕРОВ", color=discord.Color.gold())
-    text = ""
-    for i, (user_id, total) in enumerate(data, 1):
+    @discord.ui.button(label="📋 Участники", style=discord.ButtonStyle.secondary, custom_id="giveaway_members")
+    async def members_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        key = f"{interaction.channel.id}_{self.giveaway['message_id']}"
+        
+        if key not in active_giveaways:
+            await interaction.response.send_message("❌ Розыгрыш не найден", ephemeral=True)
+            return
+        
+        giveaway = active_giveaways[key]
+        participants = giveaway["participants"]
+        
+        if not participants:
+            await interaction.response.send_message("📭 Пока нет участников", ephemeral=True)
+            return
+        
+        total_participants = len(participants)
+        text = f"**📋 Участники розыгрыша** (всего: {total_participants})\n\n"
+        
+        for uid in participants[:20]:
+            user = interaction.guild.get_member(uid)
+            if not user:
+                continue
+            
+            base_chance = (giveaway["winners_count"] / total_participants) * 100
+            invite_bonus = giveaway["invite_bonus"].get(uid, 0)
+            final_chance = min(base_chance + (invite_bonus * 10), 100)
+            
+            text += f"• {user.mention} — **{final_chance:.1f}%**"
+            if invite_bonus > 0:
+                text += f" (+{invite_bonus * 10}% за инвайты)"
+            text += "\n"
+        
+        if len(participants) > 20:
+            text += f"\n*и ещё {len(participants) - 20} участников...*"
+        
+        await interaction.response.send_message(text, ephemeral=True)
+    
+    @discord.ui.button(label="🎲 Шанс", style=discord.ButtonStyle.primary, custom_id="giveaway_chance")
+    async def chance_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        key = f"{interaction.channel.id}_{self.giveaway['message_id']}"
+        
+        if key not in active_giveaways:
+            await interaction.response.send_message("❌ Розыгрыш не найден", ephemeral=True)
+            return
+        
+        giveaway = active_giveaways[key]
+        
+        if interaction.user.id not in giveaway["participants"]:
+            await interaction.response.send_message("❌ Вы не участвуете", ephemeral=True)
+            return
+        
+        count = len(giveaway["participants"])
+        base_chance = (giveaway["winners_count"] / count) * 100
+        invite_bonus = giveaway["invite_bonus"].get(interaction.user.id, 0)
+        final_chance = min(base_chance + (invite_bonus * 10), 100)
+        
+        embed = discord.Embed(
+            title="🎲 Ваш шанс на победу",
+            description=f"**{final_chance:.2f}%**",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="📊 Базовый шанс", value=f"{base_chance:.2f}%", inline=True)
+        embed.add_field(name="🎁 Бонус за инвайты", value=f"+{invite_bonus * 10}%", inline=True)
+        embed.add_field(name="👥 Всего участников", value=str(count), inline=True)
+        embed.add_field(name="🏆 Победителей", value=str(giveaway["winners_count"]), inline=True)
+        embed.set_footer(text="💡 Приглашайте друзей — каждый инвайт даёт +10% к шансу!")
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+async def end_giveaway(channel_id: int, message_id: int, reroll: bool = False):
+    key = f"{channel_id}_{message_id}"
+    
+    if key not in active_giveaways:
+        return False, None
+    
+    giveaway = active_giveaways[key]
+    participants = giveaway["participants"]
+    winners_count = giveaway["winners_count"]
+    
+    winners = []
+    if participants:
+        weighted_list = []
+        for uid in participants:
+            count = len(participants)
+            base_chance = (winners_count / count)
+            invite_bonus = giveaway["invite_bonus"].get(uid, 0)
+            weight = base_chance + (invite_bonus * 0.1)
+            weighted_list.extend([uid] * int(weight * 100))
+        
+        random.shuffle(weighted_list)
+        unique_winners = []
+        for uid in weighted_list:
+            if uid not in unique_winners:
+                unique_winners.append(uid)
+            if len(unique_winners) >= winners_count:
+                break
+        winners = unique_winners
+    
+    channel = bot.get_channel(channel_id)
+    if not channel:
+        return False, None
+    
+    try:
+        message = await channel.fetch_message(message_id)
+    except:
+        return False, None
+    
+    if winners:
+        winner_mentions = [f"<@{uid}>" for uid in winners]
+        result_text = f"**🏆 ПОБЕДИТЕЛИ:**\n{', '.join(winner_mentions)}\n\n🎉 ПОЗДРАВЛЯЕМ!"
+    else:
+        result_text = "😞 В розыгрыше никто не участвовал. Победителей нет."
+    
+    embed = discord.Embed(
+        title=f"🎁 {giveaway['prize']} — ЗАВЕРШЁН",
+        description=f"{giveaway['description']}\n\n{result_text}",
+        color=discord.Color.green()
+    )
+    embed.add_field(name="👥 Участников", value=str(len(participants)), inline=True)
+    embed.add_field(name="🏆 Победителей", value=str(len(winners)), inline=True)
+    embed.timestamp = datetime.now()
+    
+    await message.edit(embed=embed, view=None)
+    
+    if winners:
+        winner_channel = bot.get_channel(WINNER_CHANNEL_ID)
+        if winner_channel:
+            await winner_channel.send(
+                f"🎉 **РОЗЫГРЫШ ЗАВЕРШЁН!** 🎉\n\n"
+                f"**Приз:** {giveaway['prize']}\n"
+                f"**Победители:** {', '.join(winner_mentions)}\n\n"
+                f"Поздравляем!"
+            )
+    
+    if not reroll:
+        del active_giveaways[key]
+    
+    return winners, giveaway
+
+async def end_giveaway_timer(channel_id: int, message_id: int, end_time: datetime):
+    wait_seconds = (end_time - datetime.now()).total_seconds()
+    if wait_seconds > 0:
+        await asyncio.sleep(wait_seconds)
+    
+    await end_giveaway(channel_id, message_id, reroll=False)
+
+class GiveawayModal(discord.ui.Modal, title="🎁 Создание розыгрыша"):
+    duration = discord.ui.TextInput(
+        label="⏰ Время (пример: 30м, 2ч, 1д)",
+        placeholder="30м / 2ч / 1д",
+        required=True
+    )
+    winners = discord.ui.TextInput(
+        label="🏆 Количество победителей",
+        placeholder="от 1 до 10",
+        required=True
+    )
+    prize = discord.ui.TextInput(
+        label="🎁 ПРИЗ",
+        placeholder="Например: 1000 рублей",
+        required=True,
+        max_length=200
+    )
+    description = discord.ui.TextInput(
+        label="📝 Описание",
+        placeholder="Текст розыгрыша...",
+        required=True,
+        style=discord.TextStyle.paragraph,
+        max_length=1000
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not has_permission(interaction):
+            await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+            return
+            
+        duration_str = self.duration.value.lower()
+        seconds = 0
+        if duration_str.endswith("м"):
+            seconds = int(duration_str[:-1]) * 60
+        elif duration_str.endswith("ч"):
+            seconds = int(duration_str[:-1]) * 3600
+        elif duration_str.endswith("д"):
+            seconds = int(duration_str[:-1]) * 86400
+        else:
+            await interaction.response.send_message("❌ Неверный формат времени!", ephemeral=True)
+            return
+
         try:
-            user = await bot.fetch_user(user_id)
-            name = user.name
+            winners_count = int(self.winners.value)
+            if winners_count < 1 or winners_count > 10:
+                raise ValueError
         except:
-            name = f"User {user_id}"
-        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "🔹"
-        text += f"{medal} **{i}.** {name} — **{total}** приглашений\n"
+            await interaction.response.send_message("❌ Количество победителей от 1 до 10", ephemeral=True)
+            return
+
+        end_time = datetime.now() + timedelta(seconds=seconds)
+
+        giveaway_data = {
+            "prize": self.prize.value,
+            "description": self.description.value,
+            "end_time": end_time,
+            "creator_id": interaction.user.id,
+            "creator_name": interaction.user.display_name,
+            "winners_count": winners_count,
+            "participants": [],
+            "channel_id": interaction.channel_id,
+            "invite_bonus": {}
+        }
+
+        embed, view = build_giveaway_message(giveaway_data, None)
+        message = await interaction.channel.send(embed=embed, view=view)
+
+        giveaway_data["message_id"] = message.id
+        active_giveaways[f"{message.channel.id}_{message.id}"] = giveaway_data
+
+        await interaction.response.send_message("✅ Розыгрыш создан!", ephemeral=True)
+        asyncio.create_task(end_giveaway_timer(message.channel.id, message.id, end_time))
+
+# ================== ИГРА УГАДАЙ ЧИСЛО ==================
+class GuessNumberGame:
+    def __init__(self, channel_id: int, target_number: int, prize: str):
+        self.channel_id = channel_id
+        self.target_number = target_number
+        self.prize = prize
+        self.active = True
+        self.winner = None
+        self.start_time = datetime.now()
     
-    embed.description = text
-    await interaction.response.send_message(embed=embed)
+    async def check_guess(self, message: discord.Message):
+        if not self.active:
+            return False
+        
+        try:
+            guess = int(message.content.strip())
+            if guess == self.target_number:
+                self.active = False
+                self.winner = message.author.id
+                
+                winner_channel = bot.get_channel(WINNER_CHANNEL_ID)
+                if winner_channel:
+                    await winner_channel.send(
+                        f"🎉 **УГАДАЙ ЧИСЛО — ПОБЕДИТЕЛЬ!** 🎉\n\n"
+                        f"**Правильное число:** {self.target_number}\n"
+                        f"**Победитель:** {message.author.mention}\n"
+                        f"**Приз:** {self.prize}\n\n"
+                        f"Поздравляем!"
+                    )
+                
+                await message.channel.send(
+                    f"🎉 **{message.author.mention} угадал число {self.target_number}!** 🎉\n"
+                    f"Игра завершена! Победитель получит: {self.prize}"
+                )
+                return True
+        except ValueError:
+            pass
+        return False
 
 # ================== ТИКЕТЫ ==================
 class TicketView(View):
@@ -730,7 +532,7 @@ class TicketView(View):
         await asyncio.sleep(5)
         await interaction.channel.delete()
 
-# ================== SHOP ==================
+# ================== МАГАЗИН ==================
 class Shop(View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -833,7 +635,103 @@ class Shop(View):
     async def b8(self, interaction: discord.Interaction, button: Button):
         await self.process(interaction, 2, "Значок зелёного листочка", "Выдача эксклюзивного значка зелёного листочка")
 
-# ================== /SHOP ==================
+# ================== КОМАНДЫ БОТА ==================
+@bot.tree.command(name="help", description="Показать список всех доступных команд")
+async def help_command(interaction: discord.Interaction):
+    is_admin = interaction.user.guild_permissions.administrator
+    
+    embed = discord.Embed(
+        title="📚 Список команд",
+        description="Вот все доступные команды бота:",
+        color=discord.Color.blue()
+    )
+    
+    embed.add_field(
+        name="📋 Общие команды",
+        value=(
+            "`/help` - Показать это меню\n"
+            "`/info` - Информация о сервисе\n"
+            "`/shop` - Открыть магазин\n"
+            "`/invites` - Ваша статистика приглашений\n"
+            "`/top` - Топ 10 инвайтеров\n"
+            "`/server` - Статистика сервера"
+        ),
+        inline=False
+    )
+    
+    embed.add_field(
+        name="🎁 Розыгрыши и игры",
+        value=(
+            "`/gcreate` - Создать розыгрыш\n"
+            "`/gend <message_id>` - Завершить розыгрыш\n"
+            "`/greroll <message_id>` - Перевыбрать победителей\n"
+            "`/gdelete <message_id>` - Удалить розыгрыш\n"
+            "`/gmp <приз>` - Запустить игру 'Угадай число'"
+        ),
+        inline=False
+    )
+    
+    if is_admin:
+        embed.add_field(
+            name="👑 Административные команды",
+            value=(
+                "`/giveinvites <user> <amount>` - Выдать инвайты\n"
+                "`/takeinvites <user> <amount>` - Забрать инвайты\n"
+                "`/reset_user <user>` - Сбросить статистику\n"
+                "`/sync` - Синхронизировать команды\n"
+                "`/successful <order_number>` - Отметить заказ выполненным\n"
+                "`/stats <user>` - Полная статистика игрока"
+            ),
+            inline=False
+        )
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="info", description="Информация о сервисе помощи с заданиями")
+async def info(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="👑 Информация о сервисе помощи с заданиями",
+        description="Добро пожаловать! 👑",
+        color=discord.Color.purple()
+    )
+    
+    embed.add_field(
+        name="🤝 О нас",
+        value="Мы помогаем участникам выполнять задания Discord!",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="⭐ Что мы даем?",
+        value="• Украшения профиля\n• Orbs (валюта Discord)\n• Награды за выполнение заданий\n• Значки HypeSquad\n• Значок зелёного листочка",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="💰 Прайс-лист",
+        value=(
+            "🟠 1 задание (700 Orbs) - **3 инвайта**\n"
+            "🔵 Задание с украшением - **3 инвайта**\n"
+            "🩷 2 задания (1400 Orbs) - **5 инвайтов**\n"
+            "🟡 Все задания - **10 инвайтов**\n"
+            "🎁 Nitro Full (3 дня) - **5 инвайтов**\n"
+            "🟠 1 задание (200 Orbs) - **2 инвайта**\n"
+            "🎨 Значок HypeSquad (3 цвета на выбор) - **1 инвайт**\n"
+            "🍃 Новый значок зелёного листочка - **2 инвайта**"
+        ),
+        inline=False
+    )
+    
+    embed.add_field(
+        name="⚠️ Гарантии",
+        value="• Безопасность\n• Быстрое выполнение\n• Поддержка 24/7",
+        inline=False
+    )
+    
+    embed.add_field(name="📞 Как заказать?", value="Используйте команду `/shop`!", inline=False)
+    embed.set_footer(text="Ваши инвайты = ваши награды")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 @bot.tree.command(name="shop", description="Открыть магазин")
 async def shop(interaction: discord.Interaction):
     embed = discord.Embed(
@@ -856,7 +754,222 @@ async def shop(interaction: discord.Interaction):
     view = Shop()
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-# ================== /RESET ==================
+@bot.tree.command(name="invites", description="Показать статистику ваших приглашений")
+async def invites(interaction: discord.Interaction):
+    async with aiosqlite.connect("db.sqlite3") as db:
+        cursor = await db.execute("SELECT invited, left, spent, total_invites FROM users WHERE user_id=?", (interaction.user.id,))
+        data = await cursor.fetchone()
+        
+        if data:
+            invited, left, spent, total_invites = data
+            valid = invited - left - spent
+        else:
+            invited = left = spent = total_invites = 0
+            valid = 0
+        
+        cursor = await db.execute("SELECT item, date FROM purchases WHERE user_id=? ORDER BY date DESC LIMIT 10", (interaction.user.id,))
+        purchases = await cursor.fetchall()
+    
+    embed = discord.Embed(title=f"📊 Статистика {interaction.user.name}", color=discord.Color.blue())
+    embed.add_field(name="✅ Доступно", value=f"**{valid}**", inline=True)
+    embed.add_field(name="📥 Пригласил", value=f"{invited}", inline=True)
+    embed.add_field(name="📤 Вышли", value=f"{left}", inline=True)
+    embed.add_field(name="💸 Потрачено", value=f"{spent}", inline=True)
+    embed.add_field(name="📈 Всего инвайтов", value=f"{total_invites}", inline=True)
+    
+    if purchases:
+        history = "\n".join([f"• {item} ({date[:10]})" for item, date in purchases])
+        embed.add_field(name="🛒 Последние покупки", value=history, inline=False)
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="top", description="Топ 10 пользователей по приглашениям")
+async def top(interaction: discord.Interaction):
+    async with aiosqlite.connect("db.sqlite3") as db:
+        cursor = await db.execute("""
+        SELECT user_id, invited - left - spent as total
+        FROM users WHERE invited - left - spent > 0
+        ORDER BY total DESC LIMIT 10
+        """)
+        data = await cursor.fetchall()
+    
+    if not data:
+        await interaction.response.send_message("📊 Пока нет пользователей с приглашениями!", ephemeral=True)
+        return
+    
+    embed = discord.Embed(title="🏆 ТОП 10 ИНВАЙТЕРОВ", color=discord.Color.gold())
+    text = ""
+    for i, (user_id, total) in enumerate(data, 1):
+        try:
+            user = await bot.fetch_user(user_id)
+            name = user.name
+        except:
+            name = f"User {user_id}"
+        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "🔹"
+        text += f"{medal} **{i}.** {name} — **{total}** приглашений\n"
+    
+    embed.description = text
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="server", description="Показать статистику сервера")
+async def server(interaction: discord.Interaction):
+    guild = interaction.guild
+    
+    total_members = guild.member_count
+    
+    tag_role = guild.get_role(TAG_ROLE_ID)
+    tag_count = len(tag_role.members) if tag_role else 0
+    
+    owner_role = guild.get_role(OWNER_ROLE_ID)
+    owners = owner_role.members if owner_role else []
+    owners_list = "\n".join([f"• {owner.mention}" for owner in owners]) if owners else "Не найдены"
+    
+    creator = guild.owner.mention if guild.owner else "Неизвестно"
+    
+    embed = discord.Embed(
+        title=f"📊 Статистика сервера {guild.name}",
+        color=discord.Color.gold()
+    )
+    embed.set_thumbnail(url=guild.icon.url if guild.icon else None)
+    
+    embed.add_field(name="👥 Всего участников", value=f"{total_members}", inline=True)
+    embed.add_field(name="🏷️ С тегом", value=f"{tag_count}", inline=True)
+    embed.add_field(name="👑 Создатель", value=creator, inline=True)
+    
+    embed.add_field(name="👔 Владельцы", value=owners_list, inline=False)
+    
+    embed.add_field(name="📅 Сервер создан", value=guild.created_at.strftime("%d.%m.%Y"), inline=True)
+    embed.add_field(name="🔰 Уровень буста", value=guild.premium_tier, inline=True)
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="stats", description="Показать полную статистику пользователя (только для админов)")
+async def stats(interaction: discord.Interaction, user: discord.Member):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+        return
+    
+    async with aiosqlite.connect("db.sqlite3") as db:
+        cursor = await db.execute("SELECT invited, left, spent, total_invites FROM users WHERE user_id=?", (user.id,))
+        user_data = await cursor.fetchone()
+        
+        if user_data:
+            invited, left, spent, total_invites = user_data
+            valid = invited - left - spent
+        else:
+            invited = left = spent = total_invites = 0
+            valid = 0
+        
+        cursor = await db.execute("SELECT messages, join_date, last_active FROM user_stats WHERE user_id=?", (user.id,))
+        stats_data = await cursor.fetchone()
+        
+        if stats_data:
+            messages = stats_data[0] if stats_data[0] else 0
+            join_date = stats_data[1] if stats_data[1] else "Неизвестно"
+            last_active = stats_data[2] if stats_data[2] else "Неизвестно"
+        else:
+            messages = 0
+            join_date = "Неизвестно"
+            last_active = "Неизвестно"
+        
+        cursor = await db.execute("SELECT item, date FROM purchases WHERE user_id=? ORDER BY date DESC LIMIT 5", (user.id,))
+        purchases = await cursor.fetchall()
+    
+    joined_at = user.joined_at
+    if joined_at:
+        days_on_server = (datetime.now(timezone.utc) - joined_at).days
+        joined_str = joined_at.strftime("%d.%m.%Y %H:%M")
+    else:
+        days_on_server = 0
+        joined_str = "Неизвестно"
+    
+    embed = discord.Embed(
+        title=f"📊 Полная статистика {user.name}",
+        color=discord.Color.purple()
+    )
+    embed.set_thumbnail(url=user.avatar.url if user.avatar else None)
+    
+    embed.add_field(name="📥 Пригласил", value=f"{invited}", inline=True)
+    embed.add_field(name="📤 Вышли", value=f"{left}", inline=True)
+    embed.add_field(name="✅ Доступно", value=f"**{valid}**", inline=True)
+    embed.add_field(name="💸 Потрачено", value=f"{spent}", inline=True)
+    embed.add_field(name="📈 Всего инвайтов", value=f"{total_invites}", inline=True)
+    
+    embed.add_field(name="💬 Сообщений", value=f"{messages}", inline=True)
+    embed.add_field(name="📅 На сервере", value=f"{days_on_server} дней", inline=True)
+    embed.add_field(name="🕐 Зашёл", value=joined_str, inline=True)
+    embed.add_field(name="🕒 Последняя активность", value=last_active[:16] if last_active != "Неизвестно" else last_active, inline=True)
+    
+    if purchases:
+        history = "\n".join([f"• {item} ({date[:10]})" for item, date in purchases])
+        embed.add_field(name="🛒 Последние покупки", value=history, inline=False)
+    else:
+        embed.add_field(name="🛒 Покупки", value="Нет покупок", inline=False)
+    
+    embed.set_footer(text=f"ID: {user.id}")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="giveinvites", description="Выдать инвайты пользователю (только для админов)")
+async def giveinvites(interaction: discord.Interaction, user: discord.Member, amount: int):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+        return
+    
+    if amount <= 0:
+        await interaction.response.send_message("❌ Количество должно быть положительным!", ephemeral=True)
+        return
+    
+    async with aiosqlite.connect("db.sqlite3") as db:
+        await db.execute("""
+        INSERT INTO users (user_id, invited, total_invites)
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET 
+            invited = invited + ?,
+            total_invites = total_invites + ?
+        """, (user.id, amount, amount, amount, amount))
+        await db.commit()
+    
+    embed = discord.Embed(title="✅ Инвайты выданы!", description=f"{user.mention} выдано **{amount}** инвайтов!", color=discord.Color.green())
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+    log_channel = bot.get_channel(LOG_CHANNEL_ID)
+    if log_channel:
+        await log_channel.send(f"📊 {interaction.user.name} выдал {amount} инвайтов {user.mention}")
+
+@bot.tree.command(name="takeinvites", description="Забрать инвайты у пользователя (только для админов)")
+async def takeinvites(interaction: discord.Interaction, user: discord.Member, amount: int):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+        return
+    
+    if amount <= 0:
+        await interaction.response.send_message("❌ Количество должно быть положительным!", ephemeral=True)
+        return
+    
+    async with aiosqlite.connect("db.sqlite3") as db:
+        cursor = await db.execute("SELECT invited, left, spent FROM users WHERE user_id=?", (user.id,))
+        data = await cursor.fetchone()
+        
+        if data:
+            invited, left, spent = data
+            current_valid = invited - left - spent
+            
+            if current_valid < amount:
+                await interaction.response.send_message(f"❌ У {user.mention} всего {current_valid} инвайтов!", ephemeral=True)
+                return
+            
+            await db.execute("UPDATE users SET spent = spent + ? WHERE user_id=?", (amount, user.id))
+            await db.commit()
+            
+            embed = discord.Embed(title="📤 Инвайты забраны!", description=f"У {user.mention} забрано **{amount}** инвайтов!\nОсталось: {current_valid - amount}", color=discord.Color.orange())
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            
+            log_channel = bot.get_channel(LOG_CHANNEL_ID)
+            if log_channel:
+                await log_channel.send(f"📊 {interaction.user.name} забрал {amount} инвайтов у {user.mention}")
+        else:
+            await interaction.response.send_message(f"❌ У {user.mention} нет инвайтов!", ephemeral=True)
+
 @bot.tree.command(name="reset_user", description="Сбросить статистику пользователя (только для админов)")
 async def reset_user(interaction: discord.Interaction, user: discord.Member):
     if not interaction.user.guild_permissions.administrator:
@@ -873,6 +986,360 @@ async def reset_user(interaction: discord.Interaction, user: discord.Member):
         await db.commit()
     
     await interaction.response.send_message(f"✅ Статистика пользователя {user.mention} сброшена!", ephemeral=True)
+
+@bot.tree.command(name="successful", description="Отметить заказ как выполненный (только для админов)")
+async def successful(interaction: discord.Interaction, order_number: int):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+        return
+    
+    async with aiosqlite.connect("db.sqlite3") as db:
+        cursor = await db.execute(
+            "SELECT user_id, item, message_id FROM orders WHERE order_number=? AND status='Ожидается'",
+            (order_number,)
+        )
+        order = await cursor.fetchone()
+        
+        if not order:
+            await interaction.response.send_message(f"❌ Заказ #{order_number} не найден или уже выполнен!", ephemeral=True)
+            return
+        
+        user_id, item, message_id = order
+        await db.execute("UPDATE orders SET status='Выполнено' WHERE order_number=?", (order_number,))
+        await db.commit()
+    
+    orders_channel = bot.get_channel(ORDERS_CHANNEL_ID)
+    if orders_channel:
+        try:
+            message = await orders_channel.fetch_message(message_id)
+            embed = message.embeds[0] if message.embeds else None
+            if embed:
+                new_embed = discord.Embed(
+                    title=embed.title,
+                    description=embed.description,
+                    color=discord.Color.green()
+                )
+                for field in embed.fields:
+                    if field.name == "Статус":
+                        new_embed.add_field(name="Статус", value="✅ Выполнено", inline=field.inline)
+                    else:
+                        new_embed.add_field(name=field.name, value=field.value, inline=field.inline)
+                new_embed.set_footer(text=embed.footer.text)
+                await message.edit(embed=new_embed)
+        except:
+            pass
+    
+    embed = discord.Embed(title="✅ Заказ выполнен!", description=f"Заказ #{order_number} отмечен как выполненный", color=discord.Color.green())
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="gcreate", description="🎁 Создать новый розыгрыш")
+async def slash_gcreate(interaction: discord.Interaction):
+    if not has_permission(interaction):
+        await interaction.response.send_message("❌ У вас нет прав! Требуется роль или права администратора.", ephemeral=True)
+        return
+    
+    modal = GiveawayModal()
+    await interaction.response.send_modal(modal)
+
+@bot.tree.command(name="gend", description="⚡ Досрочно завершить розыгрыш")
+@app_commands.describe(message_id="ID сообщения с розыгрышем")
+async def slash_gend(interaction: discord.Interaction, message_id: str):
+    if not has_permission(interaction):
+        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+        return
+    
+    try:
+        msg_id = int(message_id)
+    except:
+        await interaction.response.send_message("❌ Неверный ID", ephemeral=True)
+        return
+    
+    key = f"{interaction.channel.id}_{msg_id}"
+    
+    if key not in active_giveaways:
+        await interaction.response.send_message("❌ Розыгрыш не найден", ephemeral=True)
+        return
+    
+    await interaction.response.send_message("⚡ Завершаю...", ephemeral=True)
+    winners, _ = await end_giveaway(interaction.channel.id, msg_id, reroll=False)
+    
+    if winners:
+        await interaction.followup.send("✅ Розыгрыш завершён!", ephemeral=True)
+    else:
+        await interaction.followup.send("✅ Завершён. Победителей нет.", ephemeral=True)
+
+@bot.tree.command(name="gdelete", description="🗑️ Удалить розыгрыш")
+@app_commands.describe(message_id="ID сообщения с розыгрышем")
+async def slash_gdelete(interaction: discord.Interaction, message_id: str):
+    if not has_permission(interaction):
+        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+        return
+    
+    try:
+        msg_id = int(message_id)
+    except:
+        await interaction.response.send_message("❌ Неверный ID", ephemeral=True)
+        return
+    
+    key = f"{interaction.channel.id}_{msg_id}"
+    
+    if key not in active_giveaways:
+        await interaction.response.send_message("❌ Розыгрыш не найден", ephemeral=True)
+        return
+    
+    try:
+        channel = bot.get_channel(interaction.channel.id)
+        message = await channel.fetch_message(msg_id)
+        await message.delete()
+    except:
+        pass
+    
+    del active_giveaways[key]
+    await interaction.response.send_message("🗑️ Розыгрыш удалён!", ephemeral=True)
+
+@bot.tree.command(name="greroll", description="🔄 Перевыбрать победителей")
+@app_commands.describe(message_id="ID сообщения с розыгрышем")
+async def slash_greroll(interaction: discord.Interaction, message_id: str):
+    if not has_permission(interaction):
+        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+        return
+    
+    try:
+        msg_id = int(message_id)
+    except:
+        await interaction.response.send_message("❌ Неверный ID", ephemeral=True)
+        return
+    
+    key = f"{interaction.channel.id}_{msg_id}"
+    
+    if key not in active_giveaways:
+        await interaction.response.send_message("❌ Розыгрыш не найден", ephemeral=True)
+        return
+    
+    winners, _ = await end_giveaway(interaction.channel.id, msg_id, reroll=True)
+    
+    if winners:
+        await interaction.response.send_message(f"🔄 Новые победители: {', '.join([f'<@{uid}>' for uid in winners])}")
+    else:
+        await interaction.response.send_message("😞 Нет участников", ephemeral=True)
+
+@bot.tree.command(name="gmp", description="🎲 Запустить игру 'Угадай число'")
+@app_commands.describe(prize="Приз для победителя")
+async def slash_gmp(interaction: discord.Interaction, prize: str):
+    if not has_permission(interaction):
+        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+        return
+    
+    target_number = random.randint(1, 100)
+    
+    embed = discord.Embed(
+        title="🎲 **УГАДАЙ ЧИСЛО** 🎲",
+        description=(
+            f"**Ваша задача отгадать число от 1 до 100.**\n\n"
+            f"**Приз:** {prize}\n\n"
+            f"**Ответ отправьте в** <#{GUESS_CHANNEL_ID}>\n"
+            f"<@&{ALLOWED_ROLE_ID}>"
+        ),
+        color=discord.Color.purple()
+    )
+    
+    await interaction.channel.send(embed=embed)
+    
+    active_guess_games[GUESS_CHANNEL_ID] = GuessNumberGame(
+        GUESS_CHANNEL_ID, target_number, prize
+    )
+    
+    await interaction.response.send_message(f"✅ Игра запущена! Загаданное число: {target_number} (логи)", ephemeral=True)
+
+@bot.tree.command(name="sync", description="Синхронизировать команды (только для админов)")
+async def sync_commands(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+        return
+    
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        guild = discord.Object(id=GUILD_ID)
+        bot.tree.copy_global_to(guild=guild)
+        synced = await bot.tree.sync(guild=guild)
+        await interaction.followup.send(f"✅ Синхронизировано {len(synced)} команд")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Ошибка: {e}")
+
+# ================== СОБЫТИЯ ==================
+@bot.event
+async def on_ready():
+    await init_db()
+    await migrate_db()
+    
+    try:
+        guild = discord.Object(id=GUILD_ID)
+        bot.tree.copy_global_to(guild=guild)
+        synced = await bot.tree.sync(guild=guild)
+        print(f"✅ Синхронизировано {len(synced)} команд")
+    except Exception as e:
+        print(f"❌ Ошибка синхронизации: {e}")
+    
+    for guild in bot.guilds:
+        try:
+            invites = await guild.invites()
+            invites_cache[guild.id] = {}
+            for invite in invites:
+                invites_cache[guild.id][invite.code] = {
+                    'uses': invite.uses,
+                    'inviter': invite.inviter.id if invite.inviter else None
+                }
+            print(f"📊 Загружено {len(invites)} инвайтов")
+        except Exception as e:
+            print(f"❌ Ошибка загрузки инвайтов: {e}")
+
+    print(f"✅ Бот запущен: {bot.user}")
+    await bot.change_presence(activity=discord.Game(name="/help | /shop | /gcreate"))
+
+@bot.event
+async def on_message(message):
+    global review_counter
+    
+    if message.author.bot:
+        return
+    
+    # Автоответ на отзывы
+    if message.channel.id == REVIEW_CHANNEL_ID:
+        review_num = review_counter
+        review_counter += 1
+        
+        reply_text = (f"Благодарим за отзыв №{review_num}! "
+                      f"SGTeam всегда с вами")
+        
+        await message.reply(reply_text)
+        return
+    
+    # Игра "Угадай число"
+    if message.channel.id == GUESS_CHANNEL_ID:
+        game = active_guess_games.get(GUESS_CHANNEL_ID)
+        if game and game.active:
+            await game.check_guess(message)
+    
+    # Подсчёт сообщений для статистики
+    async with aiosqlite.connect("db.sqlite3") as db:
+        await db.execute("""
+        INSERT INTO user_stats (user_id, messages, last_active)
+        VALUES (?, 1, datetime('now'))
+        ON CONFLICT(user_id) DO UPDATE SET 
+            messages = messages + 1,
+            last_active = datetime('now')
+        """, (message.author.id,))
+        await db.commit()
+    
+    await bot.process_commands(message)
+
+@bot.event
+async def on_member_join(member):
+    guild = member.guild
+    
+    if guild.id not in invites_cache:
+        invites_cache[guild.id] = {}
+    
+    invites = await guild.invites()
+    old = invites_cache[guild.id]
+    
+    inviter = None
+    used_invite = None
+    
+    for invite in invites:
+        old_uses = 0
+        if invite.code in old:
+            if isinstance(old[invite.code], dict):
+                old_uses = old[invite.code].get('uses', 0)
+            else:
+                old_uses = old[invite.code]
+        
+        if invite.uses > old_uses:
+            inviter = invite.inviter
+            used_invite = invite.code
+            break
+    
+    new_cache = {}
+    for invite in invites:
+        new_cache[invite.code] = {'uses': invite.uses, 'inviter': invite.inviter.id if invite.inviter else None}
+    invites_cache[guild.id] = new_cache
+    
+    channel = bot.get_channel(LOG_CHANNEL_ID)
+    if not channel:
+        return
+    
+    async with aiosqlite.connect("db.sqlite3") as db:
+        await db.execute("""
+        INSERT INTO user_stats (user_id, join_date)
+        VALUES (?, datetime('now'))
+        ON CONFLICT(user_id) DO UPDATE SET join_date = datetime('now')
+        """, (member.id,))
+        await db.commit()
+    
+    if is_fake(member):
+        await channel.send(f"⚠️ {member.mention} подозрительный аккаунт - не засчитан")
+        return
+    
+    if inviter:
+        async with aiosqlite.connect("db.sqlite3") as db:
+            cursor = await db.execute("SELECT inviter_id FROM joins WHERE user_id=?", (member.id,))
+            if not await cursor.fetchone():
+                await db.execute("""
+                INSERT INTO users (user_id, invited, total_invites)
+                VALUES (?, 1, 1)
+                ON CONFLICT(user_id) DO UPDATE SET 
+                    invited = invited + 1,
+                    total_invites = total_invites + 1
+                """, (inviter.id,))
+                
+                await db.execute("INSERT INTO joins (user_id, inviter_id, join_date) VALUES (?, ?, datetime('now'))", (member.id, inviter.id))
+                await db.execute("INSERT INTO invite_history (user_id, inviter_id, invite_code, date) VALUES (?, ?, ?, datetime('now'))", (member.id, inviter.id, used_invite))
+                await db.commit()
+                
+                cursor = await db.execute("SELECT invited, left, spent FROM users WHERE user_id=?", (inviter.id,))
+                inv_data = await cursor.fetchone()
+                if inv_data:
+                    total_valid = inv_data[0] - inv_data[1] - inv_data[2]
+                    await channel.send(f"👤 {member.mention} зашел\n📨 Пригласил: {inviter.mention}\n📊 Теперь у {inviter.name} {total_valid} инвайтов")
+            else:
+                await channel.send(f"👤 {member.mention} зашел\n📨 Пригласил: {inviter.mention}\n⚠️ Но этот пользователь уже заходил ранее - инвайт не засчитан")
+    else:
+        await channel.send(f"👤 {member.mention} зашел\n📨 Пригласил: Неизвестно")
+
+@bot.event
+async def on_member_remove(member):
+    async with aiosqlite.connect("db.sqlite3") as db:
+        cursor = await db.execute("SELECT inviter_id FROM joins WHERE user_id=? ORDER BY join_date DESC LIMIT 1", (member.id,))
+        data = await cursor.fetchone()
+        if data:
+            inviter_id = data[0]
+            await db.execute("UPDATE users SET left = left + 1 WHERE user_id=?", (inviter_id,))
+            await db.commit()
+            
+            channel = bot.get_channel(LOG_CHANNEL_ID)
+            if channel:
+                try:
+                    inviter = await bot.fetch_user(inviter_id)
+                    await channel.send(f"👋 {member.mention} покинул сервер\n📊 У {inviter.name} засчитан выход")
+                except:
+                    await channel.send(f"👋 {member.mention} покинул сервер\n📊 У пригласившего (ID: {inviter_id}) засчитан выход")
+
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    tag_role = after.guild.get_role(TAG_ROLE_ID)
+    if not tag_role:
+        return
+    
+    has_tag = any(role.id == TAG_ROLE_ID for role in after.roles)
+    
+    if has_tag:
+        target_role = after.guild.get_role(1489575333718921428)
+        if target_role and target_role not in after.roles:
+            await after.add_roles(target_role)
+            log_channel = bot.get_channel(LOG_CHANNEL_ID)
+            if log_channel:
+                await log_channel.send(f"🏷️ Пользователю {after.mention} выдана роль {target_role.mention} за наличие тега!")
 
 # ================== ЗАПУСК ==================
 if __name__ == "__main__":
