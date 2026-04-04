@@ -42,7 +42,7 @@ def keep_alive():
 TOKEN = os.getenv("TOKEN")
 GUILD_ID = 1176162885811060756
 LOG_CHANNEL_ID = 1455165169075490963
-TICKET_CATEGORY_ID = 1486980315825049640
+TICKET_CATEGORY_ID = 1490089159917043833
 ORDERS_CHANNEL_ID = 1372910944472006706
 BUYER_ROLE = "Покупатель"
 REGULAR_ROLE = "Постоянный покупатель"
@@ -55,7 +55,7 @@ REVIEW_CHANNEL_ID = int(os.getenv("REVIEW_CHANNEL_ID", 1372671847690272789))
 GUESS_CHANNEL_ID = int(os.getenv("GUESS_CHANNEL_ID", 1484247093299118262))
 WINNER_CHANNEL_ID = int(os.getenv("WINNER_CHANNEL_ID", 1372910944472006706))
 ALLOWED_ROLE_ID = int(os.getenv("ALLOWED_ROLE_ID", 1490014283164160201))
-REVIEW_COUNTER_START = int(os.getenv("REVIEW_COUNTER_START", 347))
+REVIEW_COUNTER_START = int(os.getenv("REVIEW_COUNTER_START", 350))
 
 if not TOKEN:
     print("❌ ОШИБКА: Токен не найден!")
@@ -135,7 +135,7 @@ async def get_next_order_number():
         if data and data[0]:
             order_counter = data[0] + 1
         else:
-            order_counter = 496
+            order_counter = 533
     return order_counter
 
 async def migrate_db():
