@@ -41,24 +41,21 @@ def keep_alive():
 # ================== КОНФИГУРАЦИЯ ==================
 TOKEN = os.getenv("TOKEN")
 GUILD_ID = 1176162885811060756
+LOG_CHANNEL_ID = 1455165169075490963
+TICKET_CATEGORY_ID = 1490089159917043833
+ORDERS_CHANNEL_ID = 1372910944472006706
+BUYER_ROLE = "Покупатель"
+REGULAR_ROLE = "Постоянный покупатель"
+MIN_ACCOUNT_AGE_DAYS = 3
+OWNER_ROLE_ID = 1373760116678987916
+TAG_ROLE_ID = 1489575333718921428
+TARGET_ROLE_FOR_TAG_ID = 1489575333718921428
 
-# Значения по умолчанию
-DEFAULT_CONFIG = {
-    "log_channel_id": 1455165169075490963,
-    "ticket_category_id": 1490089159917043833,
-    "orders_channel_id": 1372910944472006706,
-    "review_channel_id": 1372671847690272789,
-    "guess_channel_id": 1484247093299118262,
-    "winner_channel_id": 1372910944472006706,
-    "allowed_role_id": 1490014283164160201,
-    "buyer_role": "Покупатель",
-    "regular_role": "Постоянный покупатель",
-    "min_account_age_days": 3,
-    "owner_role_id": 1373760116678987916,
-    "tag_role_id": 1489575333718921428,
-    "target_role_for_tag_id": 1489575333718921428,  # Роль которая выдается за тег
-    "review_counter_start": 360
-}
+# Конфиг для розыгрышей и игр
+REVIEW_CHANNEL_ID = 1372671847690272789
+GUESS_CHANNEL_ID = 1484247093299118262
+WINNER_CHANNEL_ID = 1372910944472006706
+ALLOWED_ROLE_ID = 1490014283164160201
 
 if not TOKEN:
     print("❌ ОШИБКА: Токен не найден!")
@@ -72,10 +69,9 @@ invites_cache = {}
 order_counter = 533
 active_giveaways: Dict[str, dict] = {}
 active_guess_games: Dict[int, dict] = {}
-user_invites: Dict[int, int] = {}
 
-# Глобальные переменные для конфига (будут загружены из БД)
-CONFIG = DEFAULT_CONFIG.copy()
+# Счётчик отзывов (будет храниться в БД)
+review_counter = 364
 
 # ================== БАЗА ДАННЫХ ==================
 async def init_db():
@@ -153,35 +149,29 @@ async def init_db():
         )
         """)
         
-        for key, value in DEFAULT_CONFIG.items():
-            await db.execute("""
-            INSERT OR IGNORE INTO bot_settings (key, value)
-            VALUES (?, ?)
-            """, (key, str(value)))
+        # Сохраняем счётчик отзывов
+        await db.execute("""
+        INSERT OR IGNORE INTO bot_settings (key, value)
+        VALUES ('review_counter', '364')
+        """)
         
         await db.commit()
 
-async def load_config():
-    global CONFIG
+async def get_review_counter():
     async with aiosqlite.connect("db.sqlite3") as db:
-        cursor = await db.execute("SELECT key, value FROM bot_settings")
-        rows = await cursor.fetchall()
-        for key, value in rows:
-            if key.endswith("_id") or key.endswith("_start") or key.endswith("_days"):
-                CONFIG[key] = int(value)
-            elif key.endswith("_role") or key.endswith("_role_id"):
-                CONFIG[key] = int(value) if value.isdigit() else value
-            else:
-                CONFIG[key] = value
+        cursor = await db.execute("SELECT value FROM bot_settings WHERE key = 'review_counter'")
+        result = await cursor.fetchone()
+        if result:
+            return int(result[0])
+        return 364
 
-async def save_config(key: str, value):
+async def increment_review_counter():
     async with aiosqlite.connect("db.sqlite3") as db:
         await db.execute("""
-        INSERT OR REPLACE INTO bot_settings (key, value)
-        VALUES (?, ?)
-        """, (key, str(value)))
+        UPDATE bot_settings SET value = CAST(value AS INTEGER) + 1
+        WHERE key = 'review_counter'
+        """)
         await db.commit()
-    CONFIG[key] = value
 
 async def get_next_order_number():
     global order_counter
@@ -191,7 +181,7 @@ async def get_next_order_number():
         if data and data[0]:
             order_counter = data[0] + 1
         else:
-            order_counter = int(CONFIG["review_counter_start"]) + 200
+            order_counter = 564
     return order_counter
 
 async def migrate_db():
@@ -236,12 +226,12 @@ async def migrate_db():
 def has_permission(interaction: discord.Interaction) -> bool:
     if interaction.user.guild_permissions.administrator:
         return True
-    role = discord.utils.get(interaction.user.roles, id=CONFIG["allowed_role_id"])
+    role = discord.utils.get(interaction.user.roles, id=ALLOWED_ROLE_ID)
     return role is not None
 
 def is_fake(member):
     age = datetime.now(timezone.utc) - member.created_at
-    return age < timedelta(days=CONFIG["min_account_age_days"])
+    return age < timedelta(days=MIN_ACCOUNT_AGE_DAYS)
 
 async def get_invites_count(user_id):
     async with aiosqlite.connect("db.sqlite3") as db:
@@ -268,116 +258,57 @@ async def add_giveaway_invite(giveaway_key: str, inviter_id: int, invited_user_i
         """, (giveaway_key, inviter_id, invited_user_id))
         await db.commit()
 
-# ================== НАСТРОЙКИ (SETTINGS MODAL) - РАЗБИТО НА 3 ЧАСТИ ==================
-class SettingsModal1(Modal, title="⚙️ Настройки бота (1/3)"):
-    log_channel = TextInput(label="📋 Лог-канал ID", placeholder="ID канала для логов", required=True)
-    ticket_category = TextInput(label="🎫 Категория тикетов ID", placeholder="ID категории для тикетов", required=True)
-    orders_channel = TextInput(label="📦 Канал заказов ID", placeholder="ID канала для заказов", required=True)
-    review_channel = TextInput(label="⭐ Канал отзывов ID", placeholder="ID канала для отзывов", required=True)
-    guess_channel = TextInput(label="🎲 Канал игры ID", placeholder="ID канала для игры", required=True)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
-            return
-        try:
-            await save_config("log_channel_id", int(self.log_channel.value))
-            await save_config("ticket_category_id", int(self.ticket_category.value))
-            await save_config("orders_channel_id", int(self.orders_channel.value))
-            await save_config("review_channel_id", int(self.review_channel.value))
-            await save_config("guess_channel_id", int(self.guess_channel.value))
-            embed = discord.Embed(title="✅ Часть 1 сохранена!", description="Используйте `/settings2` для продолжения.", color=discord.Color.green())
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-        except ValueError as e:
-            await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
-
-
-class SettingsModal2(Modal, title="⚙️ Настройки бота (2/3)"):
-    winner_channel = TextInput(label="🏆 Канал победителей ID", placeholder="ID канала для победителей", required=True)
-    allowed_role = TextInput(label="👔 Разрешённая роль ID", placeholder="ID роли для розыгрышей", required=True)
-    buyer_role = TextInput(label="🛒 Роль покупателя", placeholder="Название роли", required=True)
-    regular_role = TextInput(label="⭐ Роль постоянного покупателя", placeholder="Название роли", required=True)
-    min_age = TextInput(label="⏰ Мин. возраст аккаунта (дней)", placeholder="3", required=True)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
-            return
-        try:
-            await save_config("winner_channel_id", int(self.winner_channel.value))
-            await save_config("allowed_role_id", int(self.allowed_role.value))
-            await save_config("buyer_role", self.buyer_role.value)
-            await save_config("regular_role", self.regular_role.value)
-            await save_config("min_account_age_days", int(self.min_age.value))
-            embed = discord.Embed(title="✅ Часть 2 сохранена!", description="Используйте `/settings3` для завершения.", color=discord.Color.green())
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-        except ValueError as e:
-            await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
-
-
-class SettingsModal3(Modal, title="⚙️ Настройки бота (3/3)"):
-    owner_role = TextInput(label="👑 Роль владельца ID", placeholder="ID роли владельца", required=True)
-    tag_role = TextInput(label="🏷️ Роль тега ID (которую проверяем)", placeholder="ID роли которую проверяем", required=True)
-    target_role = TextInput(label="🎁 Целевая роль ID", placeholder="ID роли которую выдаём за тег", required=True)
-    review_start = TextInput(label="🔢 Начать отзывы с номера", placeholder="360", required=True)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
-            return
-        try:
-            await save_config("owner_role_id", int(self.owner_role.value))
-            await save_config("tag_role_id", int(self.tag_role.value))
-            await save_config("target_role_for_tag_id", int(self.target_role.value))
-            await save_config("review_counter_start", int(self.review_start.value))
-            await load_config()
-            embed = discord.Embed(title="✅ Все настройки сохранены!", description="Конфигурация бота обновлена.", color=discord.Color.green())
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-        except ValueError as e:
-            await interaction.response.send_message(f"❌ Ошибка: {e}", ephemeral=True)
-
-
-# ================== КОМАНДЫ НАСТРОЕК ==================
-@bot.tree.command(name="settings", description="⚙️ Настроить каналы (1/3)")
-async def settings_command1(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
-        return
-    modal = SettingsModal1()
-    modal.log_channel.default = str(CONFIG["log_channel_id"])
-    modal.ticket_category.default = str(CONFIG["ticket_category_id"])
-    modal.orders_channel.default = str(CONFIG["orders_channel_id"])
-    modal.review_channel.default = str(CONFIG["review_channel_id"])
-    modal.guess_channel.default = str(CONFIG["guess_channel_id"])
-    await interaction.response.send_modal(modal)
-
-
-@bot.tree.command(name="settings2", description="⚙️ Настроить роли (2/3)")
-async def settings_command2(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
-        return
-    modal = SettingsModal2()
-    modal.winner_channel.default = str(CONFIG["winner_channel_id"])
-    modal.allowed_role.default = str(CONFIG["allowed_role_id"])
-    modal.buyer_role.default = CONFIG["buyer_role"]
-    modal.regular_role.default = CONFIG["regular_role"]
-    modal.min_age.default = str(CONFIG["min_account_age_days"])
-    await interaction.response.send_modal(modal)
-
-
-@bot.tree.command(name="settings3", description="⚙️ Настроить остальное (3/3)")
-async def settings_command3(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
-        return
-    modal = SettingsModal3()
-    modal.owner_role.default = str(CONFIG["owner_role_id"])
-    modal.tag_role.default = str(CONFIG["tag_role_id"])
-    modal.target_role.default = str(CONFIG.get("target_role_for_tag_id", CONFIG["tag_role_id"]))
-    modal.review_start.default = str(CONFIG["review_counter_start"])
-    await interaction.response.send_modal(modal)
-
+# ================== ПАГИНАЦИЯ ДЛЯ УЧАСТНИКОВ ==================
+class MembersPaginator(View):
+    def __init__(self, participants: list, giveaway_key: str, page: int = 0, items_per_page: int = 10):
+        super().__init__(timeout=60)
+        self.participants = participants
+        self.giveaway_key = giveaway_key
+        self.page = page
+        self.items_per_page = items_per_page
+        self.total_pages = (len(participants) + items_per_page - 1) // items_per_page if participants else 1
+    
+    def get_page_content(self, interaction: discord.Interaction):
+        giveaway = active_giveaways.get(self.giveaway_key, {})
+        start = self.page * self.items_per_page
+        end = start + self.items_per_page
+        page_participants = self.participants[start:end]
+        total_participants = len(self.participants)
+        
+        text = f"**📋 Участники розыгрыша** (всего: {total_participants})\n\n"
+        
+        for uid in page_participants:
+            user = interaction.guild.get_member(uid)
+            if not user:
+                continue
+            
+            base_chance = (giveaway.get("winners_count", 1) / total_participants) * 100 if total_participants > 0 else 0
+            invite_bonus = giveaway.get("invite_bonus", {}).get(uid, 0)
+            final_chance = min(base_chance + (invite_bonus * 10), 100)
+            
+            text += f"• {user.mention} — **{final_chance:.1f}%**"
+            if invite_bonus > 0:
+                text += f" (+{invite_bonus * 10}% за {invite_bonus} приглашённых)"
+            text += "\n"
+        
+        text += f"\n📄 Страница {self.page + 1} из {self.total_pages}"
+        return text
+    
+    @discord.ui.button(label="◀️ Назад", style=discord.ButtonStyle.secondary)
+    async def prev_button(self, interaction: discord.Interaction, button: Button):
+        if self.page > 0:
+            self.page -= 1
+            await interaction.response.edit_message(content=self.get_page_content(interaction), view=self)
+        else:
+            await interaction.response.send_message("Это первая страница!", ephemeral=True)
+    
+    @discord.ui.button(label="Вперед ▶️", style=discord.ButtonStyle.secondary)
+    async def next_button(self, interaction: discord.Interaction, button: Button):
+        if self.page < self.total_pages - 1:
+            self.page += 1
+            await interaction.response.edit_message(content=self.get_page_content(interaction), view=self)
+        else:
+            await interaction.response.send_message("Это последняя страница!", ephemeral=True)
 
 # ================== РОЗЫГРЫШИ ==================
 def build_giveaway_message(giveaway: dict, user_id: Optional[int] = None):
@@ -462,27 +393,8 @@ class GiveawayView(discord.ui.View):
             await interaction.response.send_message("📭 Пока нет участников", ephemeral=True)
             return
         
-        total_participants = len(participants)
-        text = f"**📋 Участники розыгрыша** (всего: {total_participants})\n\n"
-        
-        for uid in participants[:20]:
-            user = interaction.guild.get_member(uid)
-            if not user:
-                continue
-            
-            base_chance = (giveaway["winners_count"] / total_participants) * 100
-            invite_bonus = giveaway["invite_bonus"].get(uid, 0)
-            final_chance = min(base_chance + (invite_bonus * 10), 100)
-            
-            text += f"• {user.mention} — **{final_chance:.1f}%**"
-            if invite_bonus > 0:
-                text += f" (+{invite_bonus * 10}% за {invite_bonus} приглашённых)"
-            text += "\n"
-        
-        if len(participants) > 20:
-            text += f"\n*и ещё {len(participants) - 20} участников...*"
-        
-        await interaction.response.send_message(text, ephemeral=True)
+        paginator = MembersPaginator(participants, key)
+        await interaction.response.send_message(paginator.get_page_content(interaction), view=paginator, ephemeral=True)
     
     @discord.ui.button(label="🎲 Шанс", style=discord.ButtonStyle.primary, custom_id="giveaway_chance")
     async def chance_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -499,7 +411,7 @@ class GiveawayView(discord.ui.View):
             return
         
         count = len(giveaway["participants"])
-        base_chance = (giveaway["winners_count"] / count) * 100
+        base_chance = (giveaway["winners_count"] / count) * 100 if count > 0 else 0
         invite_bonus = giveaway["invite_bonus"].get(interaction.user.id, 0)
         final_chance = min(base_chance + (invite_bonus * 10), 100)
         
@@ -572,7 +484,7 @@ async def end_giveaway(channel_id: int, message_id: int, reroll: bool = False):
     await message.edit(embed=embed, view=None)
     
     if winners:
-        winner_channel = bot.get_channel(CONFIG["winner_channel_id"])
+        winner_channel = bot.get_channel(WINNER_CHANNEL_ID)
         if winner_channel:
             await winner_channel.send(
                 f"🎉 **РОЗЫГРЫШ ЗАВЕРШЁН!** 🎉\n\n"
@@ -691,7 +603,7 @@ class GuessNumberGame:
                 self.active = False
                 self.winner = message.author.id
                 
-                winner_channel = bot.get_channel(CONFIG["winner_channel_id"])
+                winner_channel = bot.get_channel(WINNER_CHANNEL_ID)
                 if winner_channel:
                     await winner_channel.send(
                         f"🎉 **УГАДАЙ ЧИСЛО — ПОБЕДИТЕЛЬ!** 🎉\n\n"
@@ -741,7 +653,7 @@ class Shop(View):
             return
         
         guild = interaction.guild
-        category = discord.utils.get(guild.categories, id=CONFIG["ticket_category_id"])
+        category = discord.utils.get(guild.categories, id=TICKET_CATEGORY_ID)
         if not category:
             await interaction.response.send_message("❌ Категория для тикетов не найдена!", ephemeral=True)
             return
@@ -760,7 +672,7 @@ class Shop(View):
         embed.set_footer(text=f"Заказчик: {interaction.user.name}")
         await channel.send(content=f"{interaction.user.mention}", embed=embed, view=TicketView())
         
-        orders_channel = bot.get_channel(CONFIG["orders_channel_id"])
+        orders_channel = bot.get_channel(ORDERS_CHANNEL_ID)
         order_message = None
         if orders_channel:
             order_embed = discord.Embed(
@@ -780,8 +692,8 @@ class Shop(View):
                            (order_number, interaction.user.id, item_name, order_message.id if order_message else 0))
             await db.commit()
         
-        buyer = discord.utils.get(guild.roles, name=CONFIG["buyer_role"])
-        regular = discord.utils.get(guild.roles, name=CONFIG["regular_role"])
+        buyer = discord.utils.get(guild.roles, name=BUYER_ROLE)
+        regular = discord.utils.get(guild.roles, name=REGULAR_ROLE)
         if buyer:
             await interaction.user.add_roles(buyer)
         
@@ -864,9 +776,6 @@ async def help_command(interaction: discord.Interaction):
         embed.add_field(
             name="👑 Административные команды",
             value=(
-                "`/settings` - Настроить каналы (1/3)\n"
-                "`/settings2` - Настроить роли (2/3)\n"
-                "`/settings3` - Настроить остальное (3/3)\n"
                 "`/giveinvites <user> <amount>` - Выдать инвайты\n"
                 "`/takeinvites <user> <amount>` - Забрать инвайты\n"
                 "`/reset_user <user>` - Сбросить статистику\n"
@@ -1009,10 +918,10 @@ async def server(interaction: discord.Interaction):
     
     total_members = guild.member_count
     
-    tag_role = guild.get_role(CONFIG["tag_role_id"])
+    tag_role = guild.get_role(TAG_ROLE_ID)
     tag_count = len(tag_role.members) if tag_role else 0
     
-    owner_role = guild.get_role(CONFIG["owner_role_id"])
+    owner_role = guild.get_role(OWNER_ROLE_ID)
     owners = owner_role.members if owner_role else []
     owners_list = "\n".join([f"• {owner.mention}" for owner in owners]) if owners else "Не найдены"
     
@@ -1124,7 +1033,7 @@ async def giveinvites(interaction: discord.Interaction, user: discord.Member, am
     embed = discord.Embed(title="✅ Инвайты выданы!", description=f"{user.mention} выдано **{amount}** инвайтов!", color=discord.Color.green())
     await interaction.response.send_message(embed=embed, ephemeral=True)
     
-    log_channel = bot.get_channel(CONFIG["log_channel_id"])
+    log_channel = bot.get_channel(LOG_CHANNEL_ID)
     if log_channel:
         await log_channel.send(f"📊 {interaction.user.name} выдал {amount} инвайтов {user.mention}")
 
@@ -1156,7 +1065,7 @@ async def takeinvites(interaction: discord.Interaction, user: discord.Member, am
             embed = discord.Embed(title="📤 Инвайты забраны!", description=f"У {user.mention} забрано **{amount}** инвайтов!\nОсталось: {current_valid - amount}", color=discord.Color.orange())
             await interaction.response.send_message(embed=embed, ephemeral=True)
             
-            log_channel = bot.get_channel(CONFIG["log_channel_id"])
+            log_channel = bot.get_channel(LOG_CHANNEL_ID)
             if log_channel:
                 await log_channel.send(f"📊 {interaction.user.name} забрал {amount} инвайтов у {user.mention}")
         else:
@@ -1200,7 +1109,7 @@ async def successful(interaction: discord.Interaction, order_number: int):
         await db.execute("UPDATE orders SET status='Выполнено' WHERE order_number=?", (order_number,))
         await db.commit()
     
-    orders_channel = bot.get_channel(CONFIG["orders_channel_id"])
+    orders_channel = bot.get_channel(ORDERS_CHANNEL_ID)
     if orders_channel:
         try:
             message = await orders_channel.fetch_message(message_id)
@@ -1333,16 +1242,16 @@ async def slash_gmp(interaction: discord.Interaction, prize: str):
         description=(
             f"**Ваша задача отгадать число от 1 до 100.**\n\n"
             f"**Приз:** {prize}\n\n"
-            f"**Ответ отправьте в** <#{CONFIG['guess_channel_id']}>\n"
-            f"<@&{CONFIG['allowed_role_id']}>"
+            f"**Ответ отправьте в** <#{GUESS_CHANNEL_ID}>\n"
+            f"<@&{ALLOWED_ROLE_ID}>"
         ),
         color=discord.Color.purple()
     )
     
     await interaction.channel.send(embed=embed)
     
-    active_guess_games[CONFIG["guess_channel_id"]] = GuessNumberGame(
-        CONFIG["guess_channel_id"], target_number, prize
+    active_guess_games[GUESS_CHANNEL_ID] = GuessNumberGame(
+        GUESS_CHANNEL_ID, target_number, prize
     )
     
     await interaction.response.send_message(f"✅ Игра запущена! Загаданное число: {target_number} (логи)", ephemeral=True)
@@ -1368,7 +1277,6 @@ async def sync_commands(interaction: discord.Interaction):
 async def on_ready():
     await init_db()
     await migrate_db()
-    await load_config()
     
     try:
         guild = discord.Object(id=GUILD_ID)
@@ -1392,15 +1300,6 @@ async def on_ready():
             print(f"❌ Ошибка загрузки инвайтов: {e}")
 
     print(f"✅ Бот запущен: {bot.user}")
-    print(f"⚙️ Текущие настройки:")
-    print(f"   📋 Лог-канал: {CONFIG['log_channel_id']}")
-    print(f"   🎫 Категория тикетов: {CONFIG['ticket_category_id']}")
-    print(f"   📦 Канал заказов: {CONFIG['orders_channel_id']}")
-    print(f"   ⭐ Канал отзывов: {CONFIG['review_channel_id']}")
-    print(f"   🎲 Канал игры: {CONFIG['guess_channel_id']}")
-    print(f"   🏆 Канал победителей: {CONFIG['winner_channel_id']}")
-    print(f"   🔢 Отзывы с номера: {CONFIG['review_counter_start']}")
-    
     await bot.change_presence(activity=discord.Game(name="/help | /shop | /gcreate"))
 
 @bot.event
@@ -1408,22 +1307,23 @@ async def on_message(message):
     if message.author.bot:
         return
     
-    if message.channel.id == CONFIG["review_channel_id"]:
-        async with aiosqlite.connect("db.sqlite3") as db:
-            cursor = await db.execute("SELECT COUNT(*) FROM purchases")
-            count = await cursor.fetchone()
-            review_num = CONFIG["review_counter_start"] + (count[0] if count else 0)
+    # Автоответ на отзывы (нумерация с 364)
+    if message.channel.id == REVIEW_CHANNEL_ID:
+        review_num = await get_review_counter()
         
         reply_text = (f"Благодарим за отзыв №{review_num}! <:800962blobcatflower:1455572431963164733> SGTeam всегда с вами <:guildtag:1484883258473840640>")
         
         await message.reply(reply_text)
+        await increment_review_counter()
         return
     
-    if message.channel.id == CONFIG["guess_channel_id"]:
-        game = active_guess_games.get(CONFIG["guess_channel_id"])
+    # Игра "Угадай число"
+    if message.channel.id == GUESS_CHANNEL_ID:
+        game = active_guess_games.get(GUESS_CHANNEL_ID)
         if game and game.active:
             await game.check_guess(message)
     
+    # Подсчёт сообщений для статистики
     async with aiosqlite.connect("db.sqlite3") as db:
         await db.execute("""
         INSERT INTO user_stats (user_id, messages, last_active)
@@ -1467,7 +1367,7 @@ async def on_member_join(member):
         new_cache[invite.code] = {'uses': invite.uses, 'inviter': invite.inviter.id if invite.inviter else None}
     invites_cache[guild.id] = new_cache
     
-    channel = bot.get_channel(CONFIG["log_channel_id"])
+    channel = bot.get_channel(LOG_CHANNEL_ID)
     if not channel:
         return
     
@@ -1505,6 +1405,7 @@ async def on_member_join(member):
                     total_valid = inv_data[0] - inv_data[1] - inv_data[2]
                     await channel.send(f"👤 {member.mention} зашел\n📨 Пригласил: {inviter.mention}\n📊 Теперь у {inviter.name} {total_valid} инвайтов")
                 
+                # Проверяем активные розыгрыши
                 for key, giveaway in active_giveaways.items():
                     if inviter.id in giveaway["participants"]:
                         await add_giveaway_invite(key, inviter.id, member.id)
@@ -1532,7 +1433,7 @@ async def on_member_remove(member):
             await db.execute("UPDATE users SET left = left + 1 WHERE user_id=?", (inviter_id,))
             await db.commit()
             
-            channel = bot.get_channel(CONFIG["log_channel_id"])
+            channel = bot.get_channel(LOG_CHANNEL_ID)
             if channel:
                 try:
                     inviter = await bot.fetch_user(inviter_id)
@@ -1542,30 +1443,26 @@ async def on_member_remove(member):
 
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
-    # Проверяем наличие роли тега
-    tag_role = after.guild.get_role(CONFIG["tag_role_id"])
-    target_role = after.guild.get_role(CONFIG.get("target_role_for_tag_id", CONFIG["tag_role_id"]))
+    tag_role = after.guild.get_role(TAG_ROLE_ID)
+    target_role = after.guild.get_role(TARGET_ROLE_FOR_TAG_ID)
     
     if not tag_role or not target_role:
         return
     
-    # Проверяем, появилась ли у пользователя роль тега
-    had_tag = any(role.id == CONFIG["tag_role_id"] for role in before.roles)
-    has_tag = any(role.id == CONFIG["tag_role_id"] for role in after.roles)
+    had_tag = any(role.id == TAG_ROLE_ID for role in before.roles)
+    has_tag = any(role.id == TAG_ROLE_ID for role in after.roles)
     
-    # Если роль тега появилась (пользователь поставил тег)
     if not had_tag and has_tag:
         if target_role not in after.roles:
             await after.add_roles(target_role)
-            log_channel = bot.get_channel(CONFIG["log_channel_id"])
+            log_channel = bot.get_channel(LOG_CHANNEL_ID)
             if log_channel:
                 await log_channel.send(f"🏷️ Пользователю {after.mention} выдана роль {target_role.mention} за наличие тега!")
     
-    # Если роль тега была снята
     elif had_tag and not has_tag:
         if target_role in after.roles:
             await after.remove_roles(target_role)
-            log_channel = bot.get_channel(CONFIG["log_channel_id"])
+            log_channel = bot.get_channel(LOG_CHANNEL_ID)
             if log_channel:
                 await log_channel.send(f"🏷️ Пользователь {after.mention} потерял роль {target_role.mention} (тег снят)")
 
