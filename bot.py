@@ -66,12 +66,12 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Кэши и переменные
 invites_cache = {}
-order_counter = 533
+order_counter = 573
 active_giveaways: Dict[str, dict] = {}
 active_guess_games: Dict[int, dict] = {}
 
 # Счётчик отзывов (будет храниться в БД)
-review_counter = 364
+review_counter = 376
 
 # ================== БАЗА ДАННЫХ ==================
 async def init_db():
