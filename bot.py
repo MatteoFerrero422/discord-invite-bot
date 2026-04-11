@@ -66,12 +66,13 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Кэши и переменные
 invites_cache = {}
-order_counter = 573
+order_counter = 591
 active_giveaways: Dict[str, dict] = {}
 active_guess_games: Dict[int, dict] = {}
+active_clickers: Dict[str, dict] = {}  # Словарь для активных кликеров
 
 # Счётчик отзывов (будет храниться в БД)
-review_counter = 376
+review_counter = 402
 
 # ================== БАЗА ДАННЫХ ==================
 async def init_db():
@@ -309,6 +310,177 @@ class MembersPaginator(View):
             await interaction.response.edit_message(content=self.get_page_content(interaction), view=self)
         else:
             await interaction.response.send_message("Это последняя страница!", ephemeral=True)
+
+# ================== КЛИКЕР-РОЗЫГРЫШ ==================
+class ClickerModal(Modal, title="🎮 Создание кликер-розыгрыша"):
+    prize = TextInput(label="🎁 ПРИЗ", placeholder="Что выигрывает победитель?", required=True, max_length=200)
+    target_clicks = TextInput(label="🎯 Целевое количество кликов", placeholder="Например: 1000", required=True)
+    winning_click = TextInput(label="⭐ Счастливый клик (необязательно)", placeholder="Оставьте пустым для случайного", required=False)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not has_permission(interaction):
+            await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+            return
+        
+        try:
+            target = int(self.target_clicks.value)
+            if target < 10:
+                await interaction.response.send_message("❌ Целевое количество кликов должно быть не менее 10!", ephemeral=True)
+                return
+            
+            winning = None
+            if self.winning_click.value:
+                winning = int(self.winning_click.value)
+                if winning < 1 or winning > target:
+                    await interaction.response.send_message(f"❌ Счастливый клик должен быть от 1 до {target}!", ephemeral=True)
+                    return
+        except ValueError:
+            await interaction.response.send_message("❌ Введите корректные числа!", ephemeral=True)
+            return
+        
+        # Создаём уникальный ID для кликера
+        clicker_id = f"{interaction.channel.id}_{datetime.now().timestamp()}"
+        
+        clicker_data = {
+            "prize": self.prize.value,
+            "target_clicks": target,
+            "winning_click": winning if winning else random.randint(1, target),
+            "current_clicks": 0,
+            "participants_clicks": {},  # Словарь для хранения количества кликов каждого участника
+            "winner": None,
+            "creator_id": interaction.user.id,
+            "creator_name": interaction.user.display_name,
+            "channel_id": interaction.channel_id,
+            "active": True
+        }
+        
+        active_clickers[clicker_id] = clicker_data
+        
+        embed = discord.Embed(
+            title="🎮 КЛИКЕР-РОЗЫГРЫШ!",
+            description=f"**Приз:** {self.prize.value}\n\n"
+                       f"**Цель:** {target} кликов\n"
+                       f"**Счастливый клик:** {clicker_data['winning_click']}/{target}\n\n"
+                       f"Кто сделает счастливый клик - тот и победит!\n\n"
+                       f"**Текущий прогресс:** 0/{target} кликов\n"
+                       f"**Участников:** 0",
+            color=discord.Color.gold()
+        )
+        embed.set_footer(text=f"Создал: {interaction.user.display_name} | Каждый может кликать неограниченно!")
+        
+        view = ClickerView(clicker_id)
+        await interaction.response.send_message(embed=embed, view=view)
+
+
+class ClickerView(View):
+    def __init__(self, clicker_id: str):
+        super().__init__(timeout=None)
+        self.clicker_id = clicker_id
+    
+    @discord.ui.button(label="🔘 КЛИК!", style=discord.ButtonStyle.primary, custom_id="click_button")
+    async def click_button(self, interaction: discord.Interaction, button: Button):
+        clicker = active_clickers.get(self.clicker_id)
+        
+        if not clicker or not clicker.get("active", False):
+            await interaction.response.send_message("❌ Этот розыгрыш уже завершён!", ephemeral=True)
+            return
+        
+        # Увеличиваем общий счётчик кликов
+        clicker["current_clicks"] += 1
+        
+        # Увеличиваем счётчик кликов для этого участника
+        if interaction.user.id not in clicker["participants_clicks"]:
+            clicker["participants_clicks"][interaction.user.id] = 0
+        clicker["participants_clicks"][interaction.user.id] += 1
+        
+        # Обновляем сообщение
+        embed = discord.Embed(
+            title="🎮 КЛИКЕР-РОЗЫГРЫШ!",
+            description=f"**Приз:** {clicker['prize']}\n\n"
+                       f"**Цель:** {clicker['target_clicks']} кликов\n"
+                       f"**Счастливый клик:** {clicker['winning_click']}/{clicker['target_clicks']}\n\n"
+                       f"**Текущий прогресс:** {clicker['current_clicks']}/{clicker['target_clicks']} кликов\n"
+                       f"**Участников:** {len(clicker['participants_clicks'])}\n\n"
+                       f"**Ваш личный счёт:** {clicker['participants_clicks'][interaction.user.id]} кликов",
+            color=discord.Color.gold()
+        )
+        embed.set_footer(text=f"Создал: {clicker['creator_name']} | Каждый может кликать неограниченно!")
+        
+        await interaction.message.edit(embed=embed)
+        
+        # Проверяем, выиграл ли кто-то
+        if clicker["current_clicks"] == clicker["winning_click"]:
+            clicker["active"] = False
+            clicker["winner"] = interaction.user.id
+            
+            # Находим топ-кликеров для статистики
+            top_clickers = sorted(clicker["participants_clicks"].items(), key=lambda x: x[1], reverse=True)[:5]
+            top_text = "\n".join([f"• <@{uid}> — {count} кликов" for uid, count in top_clickers])
+            
+            # Объявляем победителя
+            winner_embed = discord.Embed(
+                title="🎉 ПОБЕДИТЕЛЬ КЛИКЕР-РОЗЫГРЫША! 🎉",
+                description=f"**Победитель:** {interaction.user.mention}\n"
+                           f"**Приз:** {clicker['prize']}\n"
+                           f"**Счастливый клик:** {clicker['winning_click']}/{clicker['target_clicks']}\n\n"
+                           f"**Топ-5 кликеров:**\n{top_text}\n\n"
+                           f"Поздравляем! 🎊",
+                color=discord.Color.green()
+            )
+            
+            await interaction.message.edit(embed=winner_embed, view=None)
+            
+            # Отправляем в канал ожидания
+            orders_channel = bot.get_channel(ORDERS_CHANNEL_ID)
+            if orders_channel:
+                order_embed = discord.Embed(
+                    title="🎮 КЛИКЕР-РОЗЫГРЫШ ЗАВЕРШЁН!",
+                    description=f"**Победитель:** {interaction.user.mention}\n"
+                               f"**Приз:** {clicker['prize']}\n"
+                               f"**Всего кликов:** {clicker['current_clicks']}\n"
+                               f"**Участников:** {len(clicker['participants_clicks'])}\n\n"
+                               f"**Топ-5 кликеров:**\n{top_text}",
+                    color=discord.Color.green()
+                )
+                order_embed.set_footer(text=f"Создал: {clicker['creator_name']}")
+                await orders_channel.send(embed=order_embed)
+            
+            await interaction.response.send_message(f"🎉 **ПОЗДРАВЛЯЮ!** Вы сделали счастливый клик и выиграли **{clicker['prize']}**! 🎉", ephemeral=True)
+            
+            # Удаляем из активных через 10 секунд
+            async def remove_clicker():
+                await asyncio.sleep(10)
+                if self.clicker_id in active_clickers:
+                    del active_clickers[self.clicker_id]
+            asyncio.create_task(remove_clicker())
+            
+        elif clicker["current_clicks"] >= clicker["target_clicks"]:
+            # Если достигли цели, но счастливый клик не выпал (на всякий случай)
+            clicker["active"] = False
+            
+            top_clickers = sorted(clicker["participants_clicks"].items(), key=lambda x: x[1], reverse=True)[:5]
+            top_text = "\n".join([f"• <@{uid}> — {count} кликов" for uid, count in top_clickers])
+            
+            end_embed = discord.Embed(
+                title="😞 КЛИКЕР-РОЗЫГРЫШ ЗАВЕРШЁН",
+                description=f"**Цель:** {clicker['target_clicks']} кликов\n"
+                           f"**Счастливый клик:** {clicker['winning_click']}\n\n"
+                           f"К сожалению, никто не попал в счастливый клик.\n\n"
+                           f"**Топ-5 кликеров:**\n{top_text}",
+                color=discord.Color.red()
+            )
+            await interaction.message.edit(embed=end_embed, view=None)
+            
+            async def remove_clicker():
+                await asyncio.sleep(10)
+                if self.clicker_id in active_clickers:
+                    del active_clickers[self.clicker_id]
+            asyncio.create_task(remove_clicker())
+            
+            await interaction.response.send_message("❌ Розыгрыш завершён, но победитель не определён!", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"✅ Вы кликнули! Прогресс: {clicker['current_clicks']}/{clicker['target_clicks']}\nВаш личный счёт: {clicker['participants_clicks'][interaction.user.id]} кликов", ephemeral=True)
+
 
 # ================== РОЗЫГРЫШИ ==================
 def build_giveaway_message(giveaway: dict, user_id: Optional[int] = None):
@@ -767,7 +939,8 @@ async def help_command(interaction: discord.Interaction):
             "`/gend <message_id>` - Завершить розыгрыш\n"
             "`/greroll <message_id>` - Перевыбрать победителей\n"
             "`/gdelete <message_id>` - Удалить розыгрыш\n"
-            "`/gmp <приз>` - Запустить игру 'Угадай число'"
+            "`/gmp <приз>` - Запустить игру 'Угадай число'\n"
+            "`/gclick` - Создать кликер-розыгрыш"
         ),
         inline=False
     )
@@ -788,6 +961,17 @@ async def help_command(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+@bot.tree.command(name="gclick", description="🎮 Создать кликер-розыгрыш")
+async def gclick_command(interaction: discord.Interaction):
+    if not has_permission(interaction):
+        await interaction.response.send_message("❌ У вас нет прав! Требуется роль или права администратора.", ephemeral=True)
+        return
+    
+    modal = ClickerModal()
+    await interaction.response.send_modal(modal)
+
+
+# ================== ОСТАЛЬНЫЕ КОМАНДЫ (без изменений) ==================
 @bot.tree.command(name="info", description="Информация о сервисе помощи с заданиями")
 async def info(interaction: discord.Interaction):
     embed = discord.Embed(
@@ -1300,7 +1484,7 @@ async def on_ready():
             print(f"❌ Ошибка загрузки инвайтов: {e}")
 
     print(f"✅ Бот запущен: {bot.user}")
-    await bot.change_presence(activity=discord.Game(name="/help | /shop | /gcreate"))
+    await bot.change_presence(activity=discord.Game(name="/help | /shop | /gcreate | /gclick"))
 
 @bot.event
 async def on_message(message):
