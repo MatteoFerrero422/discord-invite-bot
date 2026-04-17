@@ -66,7 +66,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Кэши и переменные
 invites_cache = {}
-order_counter = 591
+order_counter = 578
 active_giveaways: Dict[str, dict] = {}
 completed_giveaways: Dict[str, dict] = {}  # Завершённые розыгрыши (для greroll)
 active_guess_games: Dict[int, dict] = {}
