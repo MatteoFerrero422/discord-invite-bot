@@ -68,6 +68,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 invites_cache = {}
 order_counter = 591
 active_giveaways: Dict[str, dict] = {}
+completed_giveaways: Dict[str, dict] = {}  # Завершённые розыгрыши (для greroll)
 active_guess_games: Dict[int, dict] = {}
 active_clickers: Dict[str, dict] = {}
 
@@ -148,7 +149,7 @@ async def init_db():
         """)
         
         await db.execute("""
-        CREATE TABLE IF NOT EXISTS saved_giveaways (
+        CREATE TABLE IF NOT EXISTS completed_giveaways (
             key TEXT PRIMARY KEY,
             data TEXT,
             end_time TEXT
@@ -157,38 +158,52 @@ async def init_db():
         
         await db.commit()
 
-async def load_saved_giveaways():
-    """Загружает сохранённые розыгрыши из БД"""
+async def save_completed_giveaway(key: str, data: dict):
+    """Сохраняет завершённый розыгрыш в БД на 30 минут"""
     async with aiosqlite.connect("db.sqlite3") as db:
-        cursor = await db.execute("SELECT key, data, end_time FROM saved_giveaways")
+        data_copy = data.copy()
+        # Сохраняем время завершения + 30 минут
+        expire_time = datetime.now() + timedelta(minutes=30)
+        await db.execute("""
+        INSERT OR REPLACE INTO completed_giveaways (key, data, end_time)
+        VALUES (?, ?, ?)
+        """, (key, json.dumps(data_copy), expire_time.isoformat()))
+        await db.commit()
+    
+    # Запускаем таймер на удаление через 30 минут
+    asyncio.create_task(delete_completed_giveaway_after_30min(key, expire_time))
+
+async def delete_completed_giveaway_after_30min(key: str, expire_time: datetime):
+    """Удаляет завершённый розыгрыш из БД через 30 минут"""
+    wait_seconds = (expire_time - datetime.now()).total_seconds()
+    if wait_seconds > 0:
+        await asyncio.sleep(wait_seconds)
+    
+    async with aiosqlite.connect("db.sqlite3") as db:
+        await db.execute("DELETE FROM completed_giveaways WHERE key = ?", (key,))
+        await db.commit()
+    
+    if key in completed_giveaways:
+        del completed_giveaways[key]
+
+async def load_completed_giveaways():
+    """Загружает завершённые розыгрыши из БД (которые ещё не истекли)"""
+    async with aiosqlite.connect("db.sqlite3") as db:
+        cursor = await db.execute("SELECT key, data, end_time FROM completed_giveaways")
         rows = await cursor.fetchall()
         for key, data_str, end_time_str in rows:
             try:
-                data = json.loads(data_str)
-                end_time = datetime.fromisoformat(end_time_str)
-                if end_time > datetime.now():
-                    data["end_time"] = end_time
-                    active_giveaways[key] = data
-                    # Запускаем таймер заново
-                    asyncio.create_task(end_giveaway_timer(data["channel_id"], data["message_id"], end_time))
+                expire_time = datetime.fromisoformat(end_time_str)
+                if expire_time > datetime.now():
+                    data = json.loads(data_str)
+                    completed_giveaways[key] = data
             except:
                 pass
 
-async def save_giveaway_to_db(key: str, data: dict):
-    """Сохраняет розыгрыш в БД"""
+async def remove_completed_giveaway_from_db(key: str):
+    """Удаляет завершённый розыгрыш из БД"""
     async with aiosqlite.connect("db.sqlite3") as db:
-        data_copy = data.copy()
-        data_copy["end_time"] = data_copy["end_time"].isoformat()
-        await db.execute("""
-        INSERT OR REPLACE INTO saved_giveaways (key, data, end_time)
-        VALUES (?, ?, ?)
-        """, (key, json.dumps(data_copy), data["end_time"].isoformat()))
-        await db.commit()
-
-async def remove_giveaway_from_db(key: str):
-    """Удаляет розыгрыш из БД"""
-    async with aiosqlite.connect("db.sqlite3") as db:
-        await db.execute("DELETE FROM saved_giveaways WHERE key = ?", (key,))
+        await db.execute("DELETE FROM completed_giveaways WHERE key = ?", (key,))
         await db.commit()
 
 async def get_next_order_number():
@@ -315,7 +330,8 @@ class MembersPaginator(View):
         self.total_pages = (len(participants) + items_per_page - 1) // items_per_page if participants else 1
     
     def get_page_content(self, interaction: discord.Interaction):
-        giveaway = active_giveaways.get(self.giveaway_key, {})
+        # Сначала проверяем активные, потом завершённые
+        giveaway = active_giveaways.get(self.giveaway_key) or completed_giveaways.get(self.giveaway_key, {})
         start = self.page * self.items_per_page
         end = start + self.items_per_page
         page_participants = self.participants[start:end]
@@ -605,38 +621,44 @@ class ClickerView(View):
 
 
 # ================== РОЗЫГРЫШИ ==================
-def build_giveaway_message(giveaway: dict, user_id: Optional[int] = None):
+def build_giveaway_message(giveaway: dict, user_id: Optional[int] = None, is_completed: bool = False):
     embed = discord.Embed(
         title=f"🎁 {giveaway['prize']}",
         description=giveaway["description"],
-        color=discord.Color.gold(),
-        timestamp=giveaway["end_time"]
+        color=discord.Color.gold() if not is_completed else discord.Color.green(),
+        timestamp=giveaway["end_time"] if not is_completed else None
     )
     
-    remaining = giveaway["end_time"] - datetime.now()
-    if remaining.total_seconds() > 0:
-        days = remaining.days
-        hours = remaining.seconds // 3600
-        minutes = (remaining.seconds % 3600) // 60
-        
-        if days > 0:
-            time_str = f"{days}д {hours}ч"
-        elif hours > 0:
-            time_str = f"{hours}ч {minutes}м"
+    if not is_completed:
+        remaining = giveaway["end_time"] - datetime.now()
+        if remaining.total_seconds() > 0:
+            days = remaining.days
+            hours = remaining.seconds // 3600
+            minutes = (remaining.seconds % 3600) // 60
+            
+            if days > 0:
+                time_str = f"{days}д {hours}ч"
+            elif hours > 0:
+                time_str = f"{hours}ч {minutes}м"
+            else:
+                time_str = f"{minutes}м"
+            embed.add_field(name="⏰ Окончание", value=time_str, inline=True)
         else:
-            time_str = f"{minutes}м"
-        embed.add_field(name="⏰ Окончание", value=time_str, inline=True)
+            embed.add_field(name="⏰ Окончание", value="Завершён", inline=True)
     else:
-        embed.add_field(name="⏰ Окончание", value="Завершён", inline=True)
+        embed.add_field(name="⏰ Статус", value="✅ Розыгрыш завершён", inline=True)
     
     embed.add_field(name="👤 Создал", value=giveaway["creator_name"], inline=True)
     embed.add_field(name="👥 Участников", value=str(len(giveaway["participants"])), inline=True)
     embed.add_field(name="🏆 Победителей", value=str(giveaway["winners_count"]), inline=True)
     
-    embed.set_footer(text="🎁 +10% шанс за каждого приглашённого ДРУГА во время розыгрыша!")
-    
-    view = GiveawayView(giveaway)
-    return embed, view
+    if not is_completed:
+        embed.set_footer(text="🎁 +10% шанс за каждого приглашённого ДРУГА во время розыгрыша!")
+        view = GiveawayView(giveaway)
+        return embed, view
+    else:
+        embed.set_footer(text="🏁 Розыгрыш завершён. Используйте /greroll для перевыбора победителей")
+        return embed, None
 
 class GiveawayView(discord.ui.View):
     def __init__(self, giveaway: dict):
@@ -676,11 +698,13 @@ class GiveawayView(discord.ui.View):
     async def members_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         key = f"{interaction.channel.id}_{self.giveaway['message_id']}"
         
-        if key not in active_giveaways:
+        # Проверяем сначала активные, потом завершённые
+        giveaway = active_giveaways.get(key) or completed_giveaways.get(key)
+        
+        if not giveaway:
             await interaction.response.send_message("❌ Розыгрыш не найден", ephemeral=True)
             return
         
-        giveaway = active_giveaways[key]
         participants = giveaway["participants"]
         
         if not participants:
@@ -695,7 +719,7 @@ class GiveawayView(discord.ui.View):
         key = f"{interaction.channel.id}_{self.giveaway['message_id']}"
         
         if key not in active_giveaways:
-            await interaction.response.send_message("❌ Розыгрыш не найден", ephemeral=True)
+            await interaction.response.send_message("❌ Розыгрыш не найден или уже завершён", ephemeral=True)
             return
         
         giveaway = active_giveaways[key]
@@ -787,11 +811,20 @@ async def end_giveaway(channel_id: int, message_id: int, reroll: bool = False):
                 f"Поздравляем!"
             )
     
+    # Сохраняем завершённый розыгрыш в БД на 30 минут для возможности /greroll
+    completed_giveaway_data = giveaway.copy()
+    completed_giveaway_data["winners"] = winners
+    completed_giveaway_data["completed_at"] = datetime.now().isoformat()
+    completed_giveaway_data["channel_id"] = channel_id
+    completed_giveaway_data["message_id"] = message_id
+    
+    completed_giveaways[key] = completed_giveaway_data
+    await save_completed_giveaway(key, completed_giveaway_data)
+    
+    # Очищаем данные о приглашениях
     async with aiosqlite.connect("db.sqlite3") as db:
         await db.execute("DELETE FROM giveaway_invites WHERE giveaway_key = ?", (key,))
         await db.commit()
-    
-    await remove_giveaway_from_db(key)
     
     if not reroll:
         del active_giveaways[key]
@@ -879,7 +912,6 @@ class GiveawayModal(discord.ui.Modal, title="🎁 Создание розыгр�
         key = f"{message.channel.id}_{message.id}"
         active_giveaways[key] = giveaway_data
         
-        await save_giveaway_to_db(key, giveaway_data)
         asyncio.create_task(end_giveaway_timer(message.channel.id, message.id, end_time))
 
 # ================== ИГРА УГАДАЙ ЧИСЛО ==================
@@ -1513,9 +1545,14 @@ async def slash_gdelete(interaction: discord.Interaction, message_id: str):
     
     key = f"{interaction.channel.id}_{msg_id}"
     
-    if key not in active_giveaways:
-        await interaction.response.send_message("❌ Розыгрыш не найден", ephemeral=True)
-        return
+    # Удаляем из активных
+    if key in active_giveaways:
+        del active_giveaways[key]
+    
+    # Удаляем из завершённых
+    if key in completed_giveaways:
+        del completed_giveaways[key]
+        await remove_completed_giveaway_from_db(key)
     
     try:
         channel = bot.get_channel(interaction.channel.id)
@@ -1528,8 +1565,6 @@ async def slash_gdelete(interaction: discord.Interaction, message_id: str):
         await db.execute("DELETE FROM giveaway_invites WHERE giveaway_key = ?", (key,))
         await db.commit()
     
-    await remove_giveaway_from_db(key)
-    del active_giveaways[key]
     await interaction.response.send_message("🗑️ Розыгрыш удалён!", ephemeral=True)
 
 
@@ -1548,17 +1583,66 @@ async def slash_greroll(interaction: discord.Interaction, message_id: str):
     
     key = f"{interaction.channel.id}_{msg_id}"
     
-    if key not in active_giveaways:
-        await interaction.response.send_message("❌ Розыгрыш не найден", ephemeral=True)
+    # Проверяем завершённые розыгрыши
+    if key not in completed_giveaways:
+        await interaction.response.send_message("❌ Розыгрыш не найден или уже недоступен для перевыбора (прошло более 30 минут)", ephemeral=True)
         return
     
-    await interaction.response.defer(ephemeral=True)
-    winners, _ = await end_giveaway(interaction.channel.id, msg_id, reroll=True)
+    giveaway = completed_giveaways[key]
+    participants = giveaway["participants"]
+    winners_count = giveaway["winners_count"]
+    
+    if not participants:
+        await interaction.response.send_message("😞 Нет участников для перевыбора", ephemeral=True)
+        return
+    
+    # Перевыбираем победителей
+    weighted_list = []
+    for uid in participants:
+        count = len(participants)
+        base_chance = (winners_count / count)
+        invite_bonus = giveaway["invite_bonus"].get(uid, 0)
+        weight = base_chance + (invite_bonus * 0.1)
+        weighted_list.extend([uid] * max(1, int(weight * 100)))
+    
+    random.shuffle(weighted_list)
+    unique_winners = []
+    for uid in weighted_list:
+        if uid not in unique_winners:
+            unique_winners.append(uid)
+        if len(unique_winners) >= winners_count:
+            break
+    winners = unique_winners
     
     if winners:
-        await interaction.followup.send(f"🔄 Новые победители: {', '.join([f'<@{uid}>' for uid in winners])}")
+        winner_mentions = [f"<@{uid}>" for uid in winners]
+        
+        # Отправляем результат в канал
+        channel = bot.get_channel(interaction.channel.id)
+        if channel:
+            embed = discord.Embed(
+                title="🔄 ПЕРЕВЫБОР ПОБЕДИТЕЛЕЙ",
+                description=f"**Розыгрыш:** {giveaway['prize']}\n"
+                           f"**Новые победители:** {', '.join(winner_mentions)}\n\n"
+                           f"Поздравляем! 🎉",
+                color=discord.Color.gold()
+            )
+            await channel.send(embed=embed)
+        
+        # Отправляем в канал ожидания
+        orders_channel = bot.get_channel(ORDERS_CHANNEL_ID)
+        if orders_channel:
+            order_embed = discord.Embed(
+                title="🔄 ПЕРЕВЫБОР ПОБЕДИТЕЛЕЙ",
+                description=f"**Розыгрыш:** {giveaway['prize']}\n"
+                           f"**Новые победители:** {', '.join(winner_mentions)}",
+                color=discord.Color.gold()
+            )
+            await orders_channel.send(embed=order_embed)
+        
+        await interaction.response.send_message(f"🔄 Новые победители: {', '.join(winner_mentions)}", ephemeral=True)
     else:
-        await interaction.followup.send("😞 Нет участников для перевыбора", ephemeral=True)
+        await interaction.response.send_message("😞 Не удалось выбрать победителей", ephemeral=True)
 
 
 @bot.tree.command(name="gmp", description="🎲 Запустить игру 'Угадай число'")
@@ -1610,7 +1694,7 @@ async def sync_commands(interaction: discord.Interaction):
 async def on_ready():
     await init_db()
     await migrate_db()
-    await load_saved_giveaways()
+    await load_completed_giveaways()
     
     try:
         guild = discord.Object(id=GUILD_ID)
