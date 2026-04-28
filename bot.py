@@ -1697,6 +1697,15 @@ async def slash_gdelete(interaction: discord.Interaction, message_id: str):
     
     try:
         msg_id = int(message_id)
+@bot.tree.command(name="gdelete", description="🗑️ Удалить розыгрыш")
+@app_commands.describe(message_id="ID сообщения с розыгрышем")
+async def slash_gdelete(interaction: discord.Interaction, message_id: str):
+    if not has_permission(interaction):
+        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+        return
+    
+    try:
+        msg_id = int(message_id)
     except:
         await interaction.response.send_message("❌ Неверный ID", ephemeral=True)
         return
@@ -1712,8 +1721,9 @@ async def slash_gdelete(interaction: discord.Interaction, message_id: str):
     
     try:
         channel = bot.get_channel(interaction.channel.id)
-        message = await channel.fetch_message(msg_id)
-        await message.delete()
+        if channel:
+            message = await channel.fetch_message(msg_id)
+            await message.delete()
     except:
         pass
     
@@ -1863,7 +1873,6 @@ async def on_ready():
             for invite in invites:
                 invites_cache[guild.id][invite.code] = {
                     'uses': invite.uses,
-                    'inviter': invite.inviter
                     'inviter': invite.inviter.id if invite.inviter else None
                 }
             print(f"📊 Загружено {len(invites)} инвайтов")
@@ -1988,8 +1997,6 @@ async def on_member_join(member):
                                 pass
                 else:
                     await channel.send(f"👤 {member.mention} зашел\n📨 Пригласил: {inviter.mention}\n⚠️ Но этот пользователь уже заходил ранее - инвайт не засчитан")
-        else:
-            await channel.send(f"👤 {member.mention} зашел\n📨 Пригласил: Неизвестно")
     except discord.errors.HTTPException as e:
         if e.status == 429:
             print(f"⚠️ Rate limit при обработке входа {member.name}: {e}")
