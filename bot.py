@@ -207,6 +207,11 @@ async def get_next_order_number():
             order_counter = 564
     return order_counter
 
+async def delete_completed_giveaway_from_db(key: str):
+    async with aiosqlite.connect("db.sqlite3") as db:
+        await db.execute("DELETE FROM completed_giveaways WHERE key = ?", (key,))
+        await db.commit()
+
 async def migrate_db():
     async with aiosqlite.connect("db.sqlite3") as db:
         cursor = await db.execute("PRAGMA table_info(joins)")
@@ -363,26 +368,64 @@ class TicketCloseView(View):
         await interaction.channel.delete()
 
 
-# ================== КОМАНДА /CREATEMENU ==================
-@bot.tree.command(name="createmenu", description="🎫 Создать меню для создания тикетов")
-async def createmenu_command(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+# ================== КОМАНДА /TAG ==================
+@bot.tree.command(name="tag", description="🏷️ Проверить наличие тега и получить роль")
+async def tag_command(interaction: discord.Interaction):
+    guild = interaction.guild
+    tag_role = guild.get_role(TAG_ROLE_ID)
+    target_role = guild.get_role(TARGET_ROLE_FOR_TAG_ID)
+    
+    if not tag_role:
+        await interaction.response.send_message("❌ Роль тега не настроена! Обратитесь к администратору.", ephemeral=True)
         return
     
-    embed = discord.Embed(
-        title="🎫 **ЦЕНТР ПОДДЕРЖКИ** 🎫",
-        description="Добро пожаловать в центр поддержки сервера!\n\n"
-                   "**Выберите нужное действие ниже:**",
-        color=discord.Color.purple()
-    )
-    embed.add_field(name="❓ Задать вопрос", value="По всем вопросам и проблемам", inline=True)
-    embed.add_field(name="🛒 Оформить заказ", value="Оформление заказов на услуги", inline=True)
-    embed.add_field(name="🎁 Получить награду", value="Получение наград за розыгрыши", inline=True)
-    embed.set_footer(text="Нажмите на кнопку ниже для создания тикета")
+    if not target_role:
+        await interaction.response.send_message("❌ Целевая роль не настроена! Обратитесь к администратору.", ephemeral=True)
+        return
     
-    view = TicketMenuView()
-    await interaction.response.send_message(embed=embed, view=view)
+    # Проверяем, есть ли у пользователя роль тега
+    has_tag = any(role.id == TAG_ROLE_ID for role in interaction.user.roles)
+    
+    if has_tag:
+        # Если есть роль тега, выдаём целевую роль
+        if target_role not in interaction.user.roles:
+            await interaction.user.add_roles(target_role)
+            embed = discord.Embed(
+                title="🏷️ Роль выдана!",
+                description=f"У вас обнаружен тег! Вам выдана роль {target_role.mention}.\n\n"
+                           f"**Что делать, если роль не появилась?**\n"
+                           f"• Подождите несколько секунд\n"
+                           f"• Напишите администратору",
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            
+            # Логируем выдачу роли
+            log_channel = bot.get_channel(LOG_CHANNEL_ID)
+            if log_channel:
+                await log_channel.send(f"🏷️ Пользователю {interaction.user.mention} выдана роль {target_role.mention} через команду /tag")
+        else:
+            embed = discord.Embed(
+                title="🏷️ Роль уже есть",
+                description=f"У вас уже есть роль {target_role.mention}!\n\n"
+                           f"Спасибо что используете наш сервер!",
+                color=discord.Color.blue()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+    else:
+        # Нет роли тега
+        embed = discord.Embed(
+            title="🏷️ Тег не обнаружен",
+            description=f"У вас нет тега на этом сервере.\n\n"
+                       f"**Как получить тег?**\n"
+                       f"• Зайдите в настройки сервера\n"
+                       f"• Выберите раздел «Теги»\n"
+                       f"• Установите любой тег\n"
+                       f"• После установки тега снова используйте `/tag`\n\n"
+                       f"После получения тега вы получите роль {target_role.mention}!",
+            color=discord.Color.orange()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ================== КОМАНДА /SAY ==================
@@ -412,6 +455,28 @@ async def say_command(interaction: discord.Interaction):
     
     modal = SayModal()
     await interaction.response.send_modal(modal)
+
+
+# ================== КОМАНДА /CREATEMENU ==================
+@bot.tree.command(name="createmenu", description="🎫 Создать меню для создания тикетов")
+async def createmenu_command(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+        return
+    
+    embed = discord.Embed(
+        title="🎫 **ЦЕНТР ПОДДЕРЖКИ** 🎫",
+        description="Добро пожаловать в центр поддержки сервера!\n\n"
+                   "**Выберите нужное действие ниже:**",
+        color=discord.Color.purple()
+    )
+    embed.add_field(name="❓ Задать вопрос", value="По всем вопросам и проблемам", inline=True)
+    embed.add_field(name="🛒 Оформить заказ", value="Оформление заказов на услуги", inline=True)
+    embed.add_field(name="🎁 Получить награду", value="Получение наград за розыгрыши", inline=True)
+    embed.set_footer(text="Нажмите на кнопку ниже для создания тикета")
+    
+    view = TicketMenuView()
+    await interaction.response.send_message(embed=embed, view=view)
 
 
 # ================== ПАГИНАЦИЯ ДЛЯ УЧАСТНИКОВ ==================
@@ -1166,7 +1231,8 @@ async def help_command(interaction: discord.Interaction):
             "`/shop` - Открыть магазин\n"
             "`/invites` - Ваша статистика приглашений\n"
             "`/top` - Топ 10 инвайтеров\n"
-            "`/server` - Статистика сервера"
+            "`/server` - Статистика сервера\n"
+            "`/tag` - Проверить наличие тега и получить роль"
         ),
         inline=False
     )
@@ -1209,27 +1275,6 @@ async def help_command(interaction: discord.Interaction):
         )
     
     await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name="createmenu", description="🎫 Создать меню для создания тикетов")
-async def createmenu_command(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
-        return
-    
-    embed = discord.Embed(
-        title="🎫 **ЦЕНТР ПОДДЕРЖКИ** 🎫",
-        description="Добро пожаловать в центр поддержки сервера!\n\n"
-                   "**Выберите нужное действие ниже:**",
-        color=discord.Color.purple()
-    )
-    embed.add_field(name="❓ Задать вопрос", value="По всем вопросам и проблемам", inline=True)
-    embed.add_field(name="🛒 Оформить заказ", value="Оформление заказов на услуги", inline=True)
-    embed.add_field(name="🎁 Получить награду", value="Получение наград за розыгрыши", inline=True)
-    embed.set_footer(text="Нажмите на кнопку ниже для создания тикета")
-    
-    view = TicketMenuView()
-    await interaction.response.send_message(embed=embed, view=view)
 
 
 @bot.tree.command(name="gclick", description="🎮 Создать кликер-розыгрыш (скрытый победный клик)")
@@ -1679,12 +1724,6 @@ async def slash_gdelete(interaction: discord.Interaction, message_id: str):
     await interaction.response.send_message("🗑️ Розыгрыш удалён!", ephemeral=True)
 
 
-async def delete_completed_giveaway_from_db(key: str):
-    async with aiosqlite.connect("db.sqlite3") as db:
-        await db.execute("DELETE FROM completed_giveaways WHERE key = ?", (key,))
-        await db.commit()
-
-
 @bot.tree.command(name="greroll", description="🔄 Перевыбрать победителей")
 @app_commands.describe(message_id="ID сообщения с розыгрышем")
 async def slash_greroll(interaction: discord.Interaction, message_id: str):
@@ -1824,6 +1863,7 @@ async def on_ready():
             for invite in invites:
                 invites_cache[guild.id][invite.code] = {
                     'uses': invite.uses,
+                    'inviter': invite.inviter
                     'inviter': invite.inviter.id if invite.inviter else None
                 }
             print(f"📊 Загружено {len(invites)} инвайтов")
@@ -1831,7 +1871,7 @@ async def on_ready():
             print(f"❌ Ошибка загрузки инвайтов: {e}")
 
     print(f"✅ Бот запущен: {bot.user}")
-    await bot.change_presence(activity=discord.Game(name="/help | /shop | /gcreate | /gclick | /gclicktop | /createmenu"))
+    await bot.change_presence(activity=discord.Game(name="/help | /shop | /gcreate | /gclick | /gclicktop | /createmenu | /tag"))
 
 
 @bot.event
@@ -1859,11 +1899,10 @@ async def on_message(message):
 
 @bot.event
 async def on_member_join(member):
-    # Проверяем, не было ли недавних запросов для этого гильда
     current_time = datetime.now().timestamp()
     if member.guild.id in last_invite_check:
         if current_time - last_invite_check[member.guild.id] < 5:
-            return  # Слишком частые запросы
+            return
     
     last_invite_check[member.guild.id] = current_time
     
