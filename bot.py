@@ -71,7 +71,7 @@ active_giveaways: Dict[str, dict] = {}
 completed_giveaways: Dict[str, dict] = {}
 active_guess_games: Dict[int, dict] = {}
 active_clickers: Dict[str, dict] = {}
-last_invite_check = {}  # Для защиты от rate limit
+last_invite_check = {}
 
 # ================== БАЗА ДАННЫХ ==================
 async def init_db():
@@ -311,13 +311,11 @@ class TicketMenuView(View):
             await interaction.response.send_message("❌ Категория для тикетов не найдена! Обратитесь к администратору.", ephemeral=True)
             return
         
-        # Проверяем, есть ли уже открытый тикет у пользователя
         for channel in category.channels:
             if channel.topic and str(interaction.user.id) in channel.topic:
                 await interaction.response.send_message(f"❌ У вас уже есть открытый тикет: {channel.mention}", ephemeral=True)
                 return
         
-        # Создаём тикет
         type_names = {
             "вопрос": "вопрос",
             "заказ": "заказ",
@@ -330,7 +328,6 @@ class TicketMenuView(View):
         await channel.set_permissions(interaction.user, read_messages=True, send_messages=True)
         await channel.set_permissions(guild.default_role, read_messages=False)
         
-        # Создаём эмбед для тикета
         embed = discord.Embed(
             title=f"📋 {type_names[ticket_type].upper()}",
             description=f"**Пользователь:** {interaction.user.mention}\n"
@@ -343,7 +340,6 @@ class TicketMenuView(View):
         view = TicketCloseView()
         await channel.send(content=interaction.user.mention, embed=embed, view=view)
         
-        # Отправляем сообщение в лог-канал
         log_channel = bot.get_channel(LOG_CHANNEL_ID)
         if log_channel:
             await log_channel.send(f"📩 Создан новый тикет '{channel.name}' пользователем {interaction.user.mention} (тип: {type_names[ticket_type]})")
@@ -360,7 +356,6 @@ class TicketCloseView(View):
         await interaction.response.send_message("Тикет будет закрыт через 5 секунд...")
         await asyncio.sleep(5)
         
-        # Логируем закрытие
         log_channel = bot.get_channel(LOG_CHANNEL_ID)
         if log_channel:
             await log_channel.send(f"🔒 Тикет '{interaction.channel.name}' закрыт")
@@ -383,11 +378,9 @@ async def tag_command(interaction: discord.Interaction):
         await interaction.response.send_message("❌ Целевая роль не настроена! Обратитесь к администратору.", ephemeral=True)
         return
     
-    # Проверяем, есть ли у пользователя роль тега
     has_tag = any(role.id == TAG_ROLE_ID for role in interaction.user.roles)
     
     if has_tag:
-        # Если есть роль тега, выдаём целевую роль
         if target_role not in interaction.user.roles:
             await interaction.user.add_roles(target_role)
             embed = discord.Embed(
@@ -400,7 +393,6 @@ async def tag_command(interaction: discord.Interaction):
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
             
-            # Логируем выдачу роли
             log_channel = bot.get_channel(LOG_CHANNEL_ID)
             if log_channel:
                 await log_channel.send(f"🏷️ Пользователю {interaction.user.mention} выдана роль {target_role.mention} через команду /tag")
@@ -413,7 +405,6 @@ async def tag_command(interaction: discord.Interaction):
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
     else:
-        # Нет роли тега
         embed = discord.Embed(
             title="🏷️ Тег не обнаружен",
             description=f"У вас нет тега на этом сервере.\n\n"
@@ -1697,16 +1688,7 @@ async def slash_gdelete(interaction: discord.Interaction, message_id: str):
     
     try:
         msg_id = int(message_id)
-@bot.tree.command(name="gdelete", description="🗑️ Удалить розыгрыш")
-@app_commands.describe(message_id="ID сообщения с розыгрышем")
-async def slash_gdelete(interaction: discord.Interaction, message_id: str):
-    if not has_permission(interaction):
-        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
-        return
-    
-    try:
-        msg_id = int(message_id)
-    except:
+    except ValueError:
         await interaction.response.send_message("❌ Неверный ID", ephemeral=True)
         return
     
