@@ -368,16 +368,18 @@ class TicketCloseView(View):
 # ================== КОМАНДА /TAG ==================
 @bot.tree.command(name="tag", description="🏷️ Проверить наличие тега и получить роль")
 async def tag_command(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    
     guild = interaction.guild
     tag_role = guild.get_role(TAG_ROLE_ID)
     target_role = guild.get_role(TARGET_ROLE_FOR_TAG_ID)
     
     if not tag_role:
-        await interaction.response.send_message("❌ Роль тега не настроена! Обратитесь к администратору.", ephemeral=True)
+        await interaction.followup.send("❌ Роль тега не настроена! Обратитесь к администратору.", ephemeral=True)
         return
     
     if not target_role:
-        await interaction.response.send_message("❌ Целевая роль не настроена! Обратитесь к администратору.", ephemeral=True)
+        await interaction.followup.send("❌ Целевая роль не настроена! Обратитесь к администратору.", ephemeral=True)
         return
     
     has_tag = any(role.id == TAG_ROLE_ID for role in interaction.user.roles)
@@ -393,7 +395,7 @@ async def tag_command(interaction: discord.Interaction):
                            f"• Напишите администратору",
                 color=discord.Color.green()
             )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             
             log_channel = bot.get_channel(LOG_CHANNEL_ID)
             if log_channel:
@@ -405,7 +407,7 @@ async def tag_command(interaction: discord.Interaction):
                            f"Спасибо что используете наш сервер!",
                 color=discord.Color.blue()
             )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
     else:
         embed = discord.Embed(
             title="🏷️ Тег не обнаружен",
@@ -418,7 +420,7 @@ async def tag_command(interaction: discord.Interaction):
                        f"После получения тега вы получите роль {target_role.mention}!",
             color=discord.Color.orange()
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 # ================== КОМАНДА /SAY ==================
@@ -1175,8 +1177,9 @@ class Shop(View):
         if buyer:
             await interaction.user.add_roles(buyer)
         
-        cursor = await db.execute("SELECT COUNT(*) FROM purchases WHERE user_id=?", (interaction.user.id,))
-        count = (await cursor.fetchone())[0]
+        async with aiosqlite.connect("db.sqlite3") as db:
+            cursor = await db.execute("SELECT COUNT(*) FROM purchases WHERE user_id=?", (interaction.user.id,))
+            count = (await cursor.fetchone())[0]
         if count >= 2 and regular:
             await interaction.user.add_roles(regular)
         
@@ -1214,8 +1217,6 @@ class Shop(View):
 # ================== КОМАНДЫ БОТА ==================
 @bot.tree.command(name="help", description="Показать список всех доступных команд")
 async def help_command(interaction: discord.Interaction):
-    is_admin = interaction.user.guild_permissions.administrator
-    
     embed = discord.Embed(
         title="📚 Список команд",
         description="Вот все доступные команды бота:",
@@ -1258,7 +1259,7 @@ async def help_command(interaction: discord.Interaction):
         inline=False
     )
     
-    if is_admin:
+    if interaction.user.guild_permissions.administrator:
         embed.add_field(
             name="👑 Административные команды",
             value=(
@@ -1461,6 +1462,8 @@ async def stats(interaction: discord.Interaction, user: discord.Member):
         await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
         return
     
+    await interaction.response.defer(ephemeral=True)
+    
     async with aiosqlite.connect("db.sqlite3") as db:
         cursor = await db.execute("SELECT invited, left, spent, total_invites FROM users WHERE user_id=?", (user.id,))
         user_data = await cursor.fetchone()
@@ -1519,7 +1522,7 @@ async def stats(interaction: discord.Interaction, user: discord.Member):
         embed.add_field(name="🛒 Покупки", value="Нет покупок", inline=False)
     
     embed.set_footer(text=f"ID: {user.id}")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="giveinvites", description="Выдать инвайты пользователю (только для админов)")
@@ -1532,6 +1535,8 @@ async def giveinvites(interaction: discord.Interaction, user: discord.Member, am
         await interaction.response.send_message("❌ Количество должно быть положительным!", ephemeral=True)
         return
     
+    await interaction.response.defer(ephemeral=True)
+    
     async with aiosqlite.connect("db.sqlite3") as db:
         await db.execute("""
         INSERT INTO users (user_id, invited, total_invites)
@@ -1543,7 +1548,7 @@ async def giveinvites(interaction: discord.Interaction, user: discord.Member, am
         await db.commit()
     
     embed = discord.Embed(title="✅ Инвайты выданы!", description=f"{user.mention} выдано **{amount}** инвайтов!", color=discord.Color.green())
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
     
     log_channel = bot.get_channel(LOG_CHANNEL_ID)
     if log_channel:
@@ -1560,6 +1565,8 @@ async def takeinvites(interaction: discord.Interaction, user: discord.Member, am
         await interaction.response.send_message("❌ Количество должно быть положительным!", ephemeral=True)
         return
     
+    await interaction.response.defer(ephemeral=True)
+    
     async with aiosqlite.connect("db.sqlite3") as db:
         cursor = await db.execute("SELECT invited, left, spent FROM users WHERE user_id=?", (user.id,))
         data = await cursor.fetchone()
@@ -1569,20 +1576,20 @@ async def takeinvites(interaction: discord.Interaction, user: discord.Member, am
             current_valid = invited - left - spent
             
             if current_valid < amount:
-                await interaction.response.send_message(f"❌ У {user.mention} всего {current_valid} инвайтов!", ephemeral=True)
+                await interaction.followup.send(f"❌ У {user.mention} всего {current_valid} инвайтов!", ephemeral=True)
                 return
             
             await db.execute("UPDATE users SET spent = spent + ? WHERE user_id=?", (amount, user.id))
             await db.commit()
             
             embed = discord.Embed(title="📤 Инвайты забраны!", description=f"У {user.mention} забрано **{amount}** инвайтов!\nОсталось: {current_valid - amount}", color=discord.Color.orange())
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             
             log_channel = bot.get_channel(LOG_CHANNEL_ID)
             if log_channel:
                 await log_channel.send(f"📊 {interaction.user.name} забрал {amount} инвайтов у {user.mention}")
         else:
-            await interaction.response.send_message(f"❌ У {user.mention} нет инвайтов!", ephemeral=True)
+            await interaction.followup.send(f"❌ У {user.mention} нет инвайтов!", ephemeral=True)
 
 
 @bot.tree.command(name="reset_user", description="Сбросить статистику пользователя (только для админов)")
@@ -1590,6 +1597,8 @@ async def reset_user(interaction: discord.Interaction, user: discord.Member):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
         return
+    
+    await interaction.response.defer(ephemeral=True)
     
     async with aiosqlite.connect("db.sqlite3") as db:
         await db.execute("DELETE FROM users WHERE user_id=?", (user.id,))
@@ -1600,7 +1609,7 @@ async def reset_user(interaction: discord.Interaction, user: discord.Member):
         await db.execute("DELETE FROM user_stats WHERE user_id=?", (user.id,))
         await db.commit()
     
-    await interaction.response.send_message(f"✅ Статистика пользователя {user.mention} сброшена!", ephemeral=True)
+    await interaction.followup.send(f"✅ Статистика пользователя {user.mention} сброшена!", ephemeral=True)
 
 
 @bot.tree.command(name="successful", description="Отметить заказ как выполненный (только для админов)")
@@ -1608,6 +1617,8 @@ async def successful(interaction: discord.Interaction, order_number: int):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
         return
+    
+    await interaction.response.defer(ephemeral=True)
     
     async with aiosqlite.connect("db.sqlite3") as db:
         cursor = await db.execute(
@@ -1617,7 +1628,7 @@ async def successful(interaction: discord.Interaction, order_number: int):
         order = await cursor.fetchone()
         
         if not order:
-            await interaction.response.send_message(f"❌ Заказ #{order_number} не найден или уже выполнен!", ephemeral=True)
+            await interaction.followup.send(f"❌ Заказ #{order_number} не найден или уже выполнен!", ephemeral=True)
             return
         
         user_id, item, message_id = order
@@ -1646,7 +1657,7 @@ async def successful(interaction: discord.Interaction, order_number: int):
             pass
     
     embed = discord.Embed(title="✅ Заказ выполнен!", description=f"Заказ #{order_number} отмечен как выполненный", color=discord.Color.green())
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="gcreate", description="🎁 Создать новый розыгрыш")
