@@ -291,29 +291,31 @@ class TicketMenuView(View):
     def __init__(self):
         super().__init__(timeout=None)
     
-    @discord.ui.button(label="❓ Задать вопрос", style=discord.ButtonStyle.primary, emoji="❓", custom_id="ask_question")
+    @discord.ui.button(label="❓ Задать вопрос", style=discord.ButtonStyle.primary, emoji="❓", custom_id="ticket_ask_question")
     async def ask_question(self, interaction: discord.Interaction, button: Button):
         await self.create_ticket(interaction, "вопрос")
     
-    @discord.ui.button(label="🛒 Оформить заказ", style=discord.ButtonStyle.success, emoji="🛒", custom_id="make_order")
+    @discord.ui.button(label="🛒 Оформить заказ", style=discord.ButtonStyle.success, emoji="🛒", custom_id="ticket_make_order")
     async def make_order(self, interaction: discord.Interaction, button: Button):
         await self.create_ticket(interaction, "заказ")
     
-    @discord.ui.button(label="🎁 Получить награду", style=discord.ButtonStyle.blurple, emoji="🎁", custom_id="get_reward")
+    @discord.ui.button(label="🎁 Получить награду", style=discord.ButtonStyle.blurple, emoji="🎁", custom_id="ticket_get_reward")
     async def get_reward(self, interaction: discord.Interaction, button: Button):
         await self.create_ticket(interaction, "награда")
     
     async def create_ticket(self, interaction: discord.Interaction, ticket_type: str):
+        await interaction.response.defer(ephemeral=True)
+        
         guild = interaction.guild
         category = discord.utils.get(guild.categories, id=TICKET_CATEGORY_ID)
         
         if not category:
-            await interaction.response.send_message("❌ Категория для тикетов не найдена! Обратитесь к администратору.", ephemeral=True)
+            await interaction.followup.send("❌ Категория для тикетов не найдена! Обратитесь к администратору.", ephemeral=True)
             return
         
         for channel in category.channels:
             if channel.topic and str(interaction.user.id) in channel.topic:
-                await interaction.response.send_message(f"❌ У вас уже есть открытый тикет: {channel.mention}", ephemeral=True)
+                await interaction.followup.send(f"❌ У вас уже есть открытый тикет: {channel.mention}", ephemeral=True)
                 return
         
         type_names = {
@@ -344,14 +346,14 @@ class TicketMenuView(View):
         if log_channel:
             await log_channel.send(f"📩 Создан новый тикет '{channel.name}' пользователем {interaction.user.mention} (тип: {type_names[ticket_type]})")
         
-        await interaction.response.send_message(f"✅ Тикет создан! Перейдите в {channel.mention}", ephemeral=True)
+        await interaction.followup.send(f"✅ Тикет создан! Перейдите в {channel.mention}", ephemeral=True)
 
 
 class TicketCloseView(View):
     def __init__(self):
         super().__init__(timeout=None)
     
-    @discord.ui.button(label="🔒 Закрыть тикет", style=discord.ButtonStyle.red, emoji="🔒")
+    @discord.ui.button(label="🔒 Закрыть тикет", style=discord.ButtonStyle.red, emoji="🔒", custom_id="ticket_close")
     async def close_ticket(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_message("Тикет будет закрыт через 5 секунд...")
         await asyncio.sleep(5)
@@ -506,7 +508,7 @@ class MembersPaginator(View):
         text += f"\n📄 Страница {self.page + 1} из {self.total_pages}"
         return text
     
-    @discord.ui.button(label="◀️ Назад", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="◀️ Назад", style=discord.ButtonStyle.secondary, custom_id="paginator_prev")
     async def prev_button(self, interaction: discord.Interaction, button: Button):
         if self.page > 0:
             self.page -= 1
@@ -514,7 +516,7 @@ class MembersPaginator(View):
         else:
             await interaction.response.send_message("Это первая страница!", ephemeral=True)
     
-    @discord.ui.button(label="Вперед ▶️", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Вперед ▶️", style=discord.ButtonStyle.secondary, custom_id="paginator_next")
     async def next_button(self, interaction: discord.Interaction, button: Button):
         if self.page < self.total_pages - 1:
             self.page += 1
@@ -811,6 +813,7 @@ def build_giveaway_message(giveaway: dict, user_id: Optional[int] = None, is_com
         embed.set_footer(text="🏁 Розыгрыш завершён. Используйте /greroll для перевыбора победителей")
         return embed, None
 
+
 class GiveawayView(discord.ui.View):
     def __init__(self, giveaway: dict):
         super().__init__(timeout=None)
@@ -896,6 +899,7 @@ class GiveawayView(discord.ui.View):
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+
 async def end_giveaway(channel_id: int, message_id: int, reroll: bool = False):
     key = f"{channel_id}_{message_id}"
     
@@ -979,12 +983,14 @@ async def end_giveaway(channel_id: int, message_id: int, reroll: bool = False):
     
     return winners, giveaway
 
+
 async def end_giveaway_timer(channel_id: int, message_id: int, end_time: datetime):
     wait_seconds = (end_time - datetime.now()).total_seconds()
     if wait_seconds > 0:
         await asyncio.sleep(wait_seconds)
     
     await end_giveaway(channel_id, message_id, reroll=False)
+
 
 class GiveawayModal(discord.ui.Modal, title="🎁 Создание розыгрыша"):
     duration = discord.ui.TextInput(
@@ -1114,18 +1120,20 @@ class Shop(View):
             return await cursor.fetchone()
     
     async def process(self, interaction, cost, item_name, item_description):
+        await interaction.response.defer(ephemeral=True)
+        
         data = await self.get_user(interaction.user.id)
         invited, left, spent = data if data else (0,0,0)
         valid = invited - left - spent
         
         if valid < cost:
-            await interaction.response.send_message(f"❌ Недостаточно инвайтов! Нужно: {cost}, у вас: {valid}", ephemeral=True)
+            await interaction.followup.send(f"❌ Недостаточно инвайтов! Нужно: {cost}, у вас: {valid}", ephemeral=True)
             return
         
         guild = interaction.guild
         category = discord.utils.get(guild.categories, id=TICKET_CATEGORY_ID)
         if not category:
-            await interaction.response.send_message("❌ Категория для тикетов не найдена!", ephemeral=True)
+            await interaction.followup.send("❌ Категория для тикетов не найдена!", ephemeral=True)
             return
         
         channel = await guild.create_text_channel(f"заказ-{interaction.user.name}", category=category)
@@ -1172,33 +1180,33 @@ class Shop(View):
         if count >= 2 and regular:
             await interaction.user.add_roles(regular)
         
-        await interaction.response.send_message(f"✅ Заказ #{order_number} создан! Перейдите в канал {channel.mention}", ephemeral=True)
+        await interaction.followup.send(f"✅ Заказ #{order_number} создан! Перейдите в канал {channel.mention}", ephemeral=True)
     
-    @discord.ui.button(label="🟠 1 задание (700 Orbs) - 3 инвайта", style=discord.ButtonStyle.green)
+    @discord.ui.button(label="🟠 1 задание (700 Orbs) - 3 инвайта", style=discord.ButtonStyle.green, custom_id="shop_item1")
     async def b1(self, interaction: discord.Interaction, button: Button):
         await self.process(interaction, 3, "1 задание (700 Orbs)", "Выполнение одного задания Discord за 💎 700 Orbs")
     
-    @discord.ui.button(label="🔵 Задание с украшением - 3 инвайта", style=discord.ButtonStyle.blurple)
+    @discord.ui.button(label="🔵 Задание с украшением - 3 инвайта", style=discord.ButtonStyle.blurple, custom_id="shop_item2")
     async def b2(self, interaction: discord.Interaction, button: Button):
         await self.process(interaction, 3, "Задание с украшением", "Выполнение задания с получением украшения профиля")
     
-    @discord.ui.button(label="🩷 2 задания (1400 Orbs) - 5 инвайтов", style=discord.ButtonStyle.green)
+    @discord.ui.button(label="🩷 2 задания (1400 Orbs) - 5 инвайтов", style=discord.ButtonStyle.green, custom_id="shop_item3")
     async def b3(self, interaction: discord.Interaction, button: Button):
         await self.process(interaction, 5, "2 задания (1400 Orbs)", "Выполнение двух заданий Discord за 💎 1400 Orbs")
     
-    @discord.ui.button(label="🟡 Все задания - 10 инвайтов", style=discord.ButtonStyle.blurple)
+    @discord.ui.button(label="🟡 Все задания - 10 инвайтов", style=discord.ButtonStyle.blurple, custom_id="shop_item4")
     async def b4(self, interaction: discord.Interaction, button: Button):
         await self.process(interaction, 10, "Все доступные задания", "Выполнение всех доступных заданий на аккаунте")
     
-    @discord.ui.button(label="🎁 Nitro Full (3 дня) - 5 инвайтов", style=discord.ButtonStyle.green)
+    @discord.ui.button(label="🎁 Nitro Full (3 дня) - 5 инвайтов", style=discord.ButtonStyle.green, custom_id="shop_item5")
     async def b5(self, interaction: discord.Interaction, button: Button):
         await self.process(interaction, 5, "Nitro Full на 3 дня", "Получение Discord Nitro на 3 дня")
     
-    @discord.ui.button(label="🟠 1 задание (200 Orbs) - 2 инвайта", style=discord.ButtonStyle.blurple)
+    @discord.ui.button(label="🟠 1 задание (200 Orbs) - 2 инвайта", style=discord.ButtonStyle.blurple, custom_id="shop_item6")
     async def b6(self, interaction: discord.Interaction, button: Button):
         await self.process(interaction, 2, "1 задание (200 Orbs)", "Выполнение одного задания Discord за 💎 200 Orbs")
     
-    @discord.ui.button(label="🎨 Значок HypeSquad - 1 инвайт", style=discord.ButtonStyle.blurple)
+    @discord.ui.button(label="🎨 Значок HypeSquad - 1 инвайт", style=discord.ButtonStyle.blurple, custom_id="shop_item7")
     async def b7(self, interaction: discord.Interaction, button: Button):
         await self.process(interaction, 1, "Значок HypeSquad (3 цвета на выбор)", "Выдача значка HypeSquad (Brilliance/Bravery/Balance на выбор)")
 
