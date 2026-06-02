@@ -53,9 +53,10 @@ TAG_ROLE_ID = 1489575333718921428
 TARGET_ROLE_FOR_TAG_ID = 1489575333718921428
 
 # Конфиг для розыгрышей и игр
-GUESS_CHANNEL_ID = 1484247093299118262
+GUESS_CHANNEL_ID = 1484179478044479678  # Изменено на канал для игр
 WINNER_CHANNEL_ID = 1372910944472006706
 ALLOWED_ROLE_ID = 1490014283164160201
+GAME_ANNOUNCE_ROLE_ID = 1450431350313058444  # Роль для тега в анонсах
 
 if not TOKEN:
     print("❌ ОШИБКА: Токен не найден!")
@@ -72,6 +73,9 @@ completed_giveaways: Dict[str, dict] = {}
 active_guess_games: Dict[int, dict] = {}
 active_clickers: Dict[str, dict] = {}
 last_invite_check = {}
+
+# Очередь запланированных игр (максимум 5)
+scheduled_games: List[dict] = []  # Каждый элемент: {"type": "guess" или "clicktop", "time": datetime, "prize": str, "creator_id": int, "creator_name": str}
 
 # ================== БАЗА ДАННЫХ ==================
 async def init_db():
@@ -154,6 +158,27 @@ async def init_db():
             key TEXT PRIMARY KEY,
             data TEXT,
             end_time TEXT
+        )
+        """)
+        
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS banned_users (
+            user_id INTEGER PRIMARY KEY,
+            reason TEXT,
+            ban_end TEXT,
+            banned_by INTEGER,
+            ban_date TEXT
+        )
+        """)
+        
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS scheduled_games (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            type TEXT,
+            game_time TEXT,
+            prize TEXT,
+            creator_id INTEGER,
+            creator_name TEXT
         )
         """)
         
@@ -285,6 +310,136 @@ async def add_giveaway_invite(giveaway_key: str, inviter_id: int, invited_user_i
         VALUES (?, ?, ?, datetime('now'))
         """, (giveaway_key, inviter_id, invited_user_id))
         await db.commit()
+
+async def load_scheduled_games():
+    global scheduled_games
+    async with aiosqlite.connect("db.sqlite3") as db:
+        cursor = await db.execute("SELECT id, type, game_time, prize, creator_id, creator_name FROM scheduled_games ORDER BY game_time ASC")
+        rows = await cursor.fetchall()
+        scheduled_games = []
+        now = datetime.now()
+        for row in rows:
+            game_id, game_type, game_time_str, prize, creator_id, creator_name = row
+            game_time = datetime.fromisoformat(game_time_str)
+            if game_time > now:
+                scheduled_games.append({
+                    "id": game_id,
+                    "type": game_type,
+                    "time": game_time,
+                    "prize": prize,
+                    "creator_id": creator_id,
+                    "creator_name": creator_name
+                })
+        print(f"📅 Загружено {len(scheduled_games)} запланированных игр")
+
+async def save_scheduled_game(game_type: str, game_time: datetime, prize: str, creator_id: int, creator_name: str):
+    async with aiosqlite.connect("db.sqlite3") as db:
+        cursor = await db.execute("""
+        INSERT INTO scheduled_games (type, game_time, prize, creator_id, creator_name)
+        VALUES (?, ?, ?, ?, ?)
+        """, (game_type, game_time.isoformat(), prize, creator_id, creator_name))
+        await db.commit()
+        game_id = cursor.lastrowid
+    return game_id
+
+async def delete_scheduled_game(game_id: int):
+    async with aiosqlite.connect("db.sqlite3") as db:
+        await db.execute("DELETE FROM scheduled_games WHERE id = ?", (game_id,))
+        await db.commit()
+
+async def check_scheduled_games():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        now = datetime.now()
+        games_to_start = [g for g in scheduled_games if g["time"] <= now]
+        
+        for game in games_to_start:
+            if game["type"] == "guess":
+                await start_scheduled_guess_game(game)
+            elif game["type"] == "clicktop":
+                await start_scheduled_clicktop_game(game)
+            
+            await delete_scheduled_game(game["id"])
+            scheduled_games.remove(game)
+        
+        await asyncio.sleep(30)  # Проверка каждые 30 секунд
+
+async def start_scheduled_guess_game(game: dict):
+    channel = bot.get_channel(GUESS_CHANNEL_ID)
+    if not channel:
+        print(f"❌ Канал {GUESS_CHANNEL_ID} не найден для игры 'Угадай число'")
+        return
+    
+    target_number = random.randint(1, 100)
+    
+    embed = discord.Embed(
+        title="🎲 **УГАДАЙ ЧИСЛО** 🎲",
+        description=(
+            f"**Ваша задача отгадать число от 1 до 100.**\n\n"
+            f"**Приз:** {game['prize']}\n\n"
+            f"**Ответ отправьте в этот канал**\n"
+            f"<@&{GAME_ANNOUNCE_ROLE_ID}>"
+        ),
+        color=discord.Color.purple()
+    )
+    embed.set_footer(text=f"Игра создана по расписанию | Создал: {game['creator_name']}")
+    
+    await channel.send(embed=embed)
+    
+    active_guess_games[GUESS_CHANNEL_ID] = GuessNumberGame(
+        GUESS_CHANNEL_ID, target_number, game['prize']
+    )
+    
+    log_channel = bot.get_channel(LOG_CHANNEL_ID)
+    if log_channel:
+        await log_channel.send(f"🎲 Автоматически запущена игра 'Угадай число' с призом: {game['prize']}")
+
+async def start_scheduled_clicktop_game(game: dict):
+    channel = bot.get_channel(GUESS_CHANNEL_ID)
+    if not channel:
+        print(f"❌ Канал {GUESS_CHANNEL_ID} не найден для кликер-конкурса")
+        return
+    
+    duration_minutes = 10  # Длительность по умолчанию 10 минут
+    end_time = datetime.now() + timedelta(minutes=duration_minutes)
+    clicker_id = f"top_{channel.id}_{datetime.now().timestamp()}"
+    
+    clicker_data = {
+        "type": "top",
+        "prize": game['prize'],
+        "duration_minutes": duration_minutes,
+        "end_time": end_time,
+        "current_clicks": 0,
+        "participants_clicks": {},
+        "winner": None,
+        "creator_id": game['creator_id'],
+        "creator_name": game['creator_name'],
+        "channel_id": channel.id,
+        "active": True
+    }
+    
+    active_clickers[clicker_id] = clicker_data
+    
+    embed = discord.Embed(
+        title="🎮 КЛИКЕР-КОНКУРС!",
+        description=f"**Приз:** {game['prize']}\n\n"
+                   f"**Время:** {duration_minutes} минут\n"
+                   f"**Правило:** Кто больше всех кликнет за отведённое время - тот победит!\n\n"
+                   f"**Текущий прогресс:** 0 кликов\n"
+                   f"**Участников:** 0",
+        color=discord.Color.purple()
+    )
+    embed.set_footer(text=f"Создал: {game['creator_name']} | Конкурс закончится через {duration_minutes} минут")
+    embed.timestamp = end_time
+    
+    view = ClickerView(clicker_id)
+    await channel.send(embed=embed, view=view)
+    
+    asyncio.create_task(end_top_clicker(clicker_id, end_time))
+    
+    log_channel = bot.get_channel(LOG_CHANNEL_ID)
+    if log_channel:
+        await log_channel.send(f"🎮 Автоматически запущен кликер-конкурс с призом: {game['prize']}")
 
 # ================== МЕНЮ ТИКЕТОВ ==================
 class TicketMenuView(View):
@@ -527,60 +682,7 @@ class MembersPaginator(View):
             await interaction.response.send_message("Это последняя страница!", ephemeral=True)
 
 
-# ================== КЛИКЕР-РОЗЫГРЫШ ==================
-class ClickerModal(Modal, title="🎮 Создание кликер-розыгрыша (скрытый клик)"):
-    prize = TextInput(label="🎁 ПРИЗ", placeholder="Что выигрывает победитель?", required=True, max_length=200)
-    target_clicks = TextInput(label="🎯 Целевое количество кликов", placeholder="Например: 1000", required=True)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        if not has_permission(interaction):
-            await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
-            return
-        
-        try:
-            target = int(self.target_clicks.value)
-            if target < 10:
-                await interaction.response.send_message("❌ Целевое количество кликов должно быть не менее 10!", ephemeral=True)
-                return
-        except ValueError:
-            await interaction.response.send_message("❌ Введите корректное число!", ephemeral=True)
-            return
-        
-        winning_click = random.randint(1, target)
-        clicker_id = f"{interaction.channel.id}_{datetime.now().timestamp()}"
-        
-        clicker_data = {
-            "type": "hidden",
-            "prize": self.prize.value,
-            "target_clicks": target,
-            "winning_click": winning_click,
-            "current_clicks": 0,
-            "participants_clicks": {},
-            "winner": None,
-            "creator_id": interaction.user.id,
-            "creator_name": interaction.user.display_name,
-            "channel_id": interaction.channel_id,
-            "active": True
-        }
-        
-        active_clickers[clicker_id] = clicker_data
-        
-        embed = discord.Embed(
-            title="🎮 КЛИКЕР-РОЗЫГРЫШ!",
-            description=f"**Приз:** {self.prize.value}\n\n"
-                       f"**Цель:** {target} кликов\n"
-                       f"**Секрет:** Победный клик спрятан! 🔥\n\n"
-                       f"Кликни и, возможно, именно ТЫ станешь победителем!\n\n"
-                       f"**Текущий прогресс:** 0/{target} кликов\n"
-                       f"**Участников:** 0",
-            color=discord.Color.gold()
-        )
-        embed.set_footer(text=f"Создал: {interaction.user.display_name} | Каждый может кликать сколько угодно! Победный клик НЕ ВИДЕН")
-        
-        view = ClickerView(clicker_id)
-        await interaction.response.send_message(embed=embed, view=view)
-
-
+# ================== КЛИКЕР-КОНКУРС (без скрытого клика) ==================
 class ClickerTopModal(Modal, title="🎮 Создание кликер-конкурса (на время)"):
     prize = TextInput(label="🎁 ПРИЗ", placeholder="Что выигрывает победитель?", required=True, max_length=200)
     duration = TextInput(label="⏰ Длительность (в минутах)", placeholder="Например: 5, 10, 30", required=True)
@@ -686,7 +788,7 @@ class ClickerView(View):
         clicker = active_clickers.get(self.clicker_id)
         
         if not clicker or not clicker.get("active", False):
-            await interaction.response.send_message("❌ Этот розыгрыш уже завершён!", ephemeral=True)
+            await interaction.response.send_message("❌ Этот конкурс уже завершён!", ephemeral=True)
             return
         
         clicker["current_clicks"] += 1
@@ -695,84 +797,26 @@ class ClickerView(View):
             clicker["participants_clicks"][interaction.user.id] = 0
         clicker["participants_clicks"][interaction.user.id] += 1
         
-        if clicker["type"] == "hidden":
-            embed = discord.Embed(
-                title="🎮 КЛИКЕР-РОЗЫГРЫШ!",
-                description=f"**Приз:** {clicker['prize']}\n\n"
-                           f"**Цель:** {clicker['target_clicks']} кликов\n"
-                           f"**Секрет:** Победный клик спрятан! 🔥\n\n"
-                           f"Кликни и, возможно, именно ТЫ станешь победителем!\n\n"
-                           f"**Текущий прогресс:** {clicker['current_clicks']}/{clicker['target_clicks']} кликов\n"
-                           f"**Участников:** {len(clicker['participants_clicks'])}\n\n"
-                           f"**Ваш личный счёт:** {clicker['participants_clicks'][interaction.user.id]} кликов",
-                color=discord.Color.gold()
-            )
-            embed.set_footer(text=f"Создал: {clicker['creator_name']} | Каждый может кликать! Победный клик НЕ ВИДЕН")
-            await interaction.message.edit(embed=embed)
-            
-            if clicker["current_clicks"] == clicker["winning_click"]:
-                clicker["active"] = False
-                clicker["winner"] = interaction.user.id
-                
-                top_clickers = sorted(clicker["participants_clicks"].items(), key=lambda x: x[1], reverse=True)[:5]
-                top_text = "\n".join([f"• <@{uid}> — {count} кликов" for uid, count in top_clickers])
-                
-                winner_embed = discord.Embed(
-                    title="🎉 ПОБЕДИТЕЛЬ КЛИКЕР-РОЗЫГРЫША! 🎉",
-                    description=f"**Победитель:** {interaction.user.mention}\n"
-                               f"**Приз:** {clicker['prize']}\n"
-                               f"**Счастливый клик:** {clicker['winning_click']}/{clicker['target_clicks']}\n\n"
-                               f"**Топ-5 кликеров:**\n{top_text}\n\n"
-                               f"Поздравляем! 🎊",
-                    color=discord.Color.green()
-                )
-                await interaction.message.edit(embed=winner_embed, view=None)
-                
-                orders_channel = bot.get_channel(ORDERS_CHANNEL_ID)
-                if orders_channel:
-                    order_embed = discord.Embed(
-                        title="🎮 КЛИКЕР-РОЗЫГРЫШ ЗАВЕРШЁН!",
-                        description=f"**Победитель:** {interaction.user.mention}\n"
-                                   f"**Приз:** {clicker['prize']}\n"
-                                   f"**Всего кликов:** {clicker['current_clicks']}\n"
-                                   f"**Участников:** {len(clicker['participants_clicks'])}\n\n"
-                                   f"**Топ-5 кликеров:**\n{top_text}",
-                        color=discord.Color.green()
-                    )
-                    order_embed.set_footer(text=f"Создал: {clicker['creator_name']}")
-                    await orders_channel.send(embed=order_embed)
-                
-                await interaction.response.send_message(f"🎉 **ПОЗДРАВЛЯЮ!** Вы сделали счастливый клик и выиграли **{clicker['prize']}**! 🎉", ephemeral=True)
-                
-                async def remove_clicker():
-                    await asyncio.sleep(10)
-                    if self.clicker_id in active_clickers:
-                        del active_clickers[self.clicker_id]
-                asyncio.create_task(remove_clicker())
-            else:
-                await interaction.response.send_message(f"✅ Вы кликнули! Прогресс: {clicker['current_clicks']}/{clicker['target_clicks']}\nВаш личный счёт: {clicker['participants_clicks'][interaction.user.id]} кликов", ephemeral=True)
+        remaining = clicker["end_time"] - datetime.now()
+        remaining_minutes = int(remaining.total_seconds() // 60)
+        remaining_seconds = int(remaining.total_seconds() % 60)
         
-        else:
-            remaining = clicker["end_time"] - datetime.now()
-            remaining_minutes = int(remaining.total_seconds() // 60)
-            remaining_seconds = int(remaining.total_seconds() % 60)
-            
-            embed = discord.Embed(
-                title="🎮 КЛИКЕР-КОНКУРС!",
-                description=f"**Приз:** {clicker['prize']}\n\n"
-                           f"**Время:** {clicker['duration_minutes']} минут\n"
-                           f"**Осталось:** {remaining_minutes}м {remaining_seconds}с\n"
-                           f"**Правило:** Кто больше всех кликнет - тот победит!\n\n"
-                           f"**Текущий прогресс:** {clicker['current_clicks']} кликов\n"
-                           f"**Участников:** {len(clicker['participants_clicks'])}\n\n"
-                           f"**Ваш личный счёт:** {clicker['participants_clicks'][interaction.user.id]} кликов",
-                color=discord.Color.purple()
-            )
-            embed.set_footer(text=f"Создал: {clicker['creator_name']} | Конкурс идёт!")
-            embed.timestamp = clicker["end_time"]
-            await interaction.message.edit(embed=embed)
-            
-            await interaction.response.send_message(f"✅ Вы кликнули! Всего кликов: {clicker['current_clicks']}\nВаш личный счёт: {clicker['participants_clicks'][interaction.user.id]} кликов", ephemeral=True)
+        embed = discord.Embed(
+            title="🎮 КЛИКЕР-КОНКУРС!",
+            description=f"**Приз:** {clicker['prize']}\n\n"
+                       f"**Время:** {clicker['duration_minutes']} минут\n"
+                       f"**Осталось:** {remaining_minutes}м {remaining_seconds}с\n"
+                       f"**Правило:** Кто больше всех кликнет - тот победит!\n\n"
+                       f"**Текущий прогресс:** {clicker['current_clicks']} кликов\n"
+                       f"**Участников:** {len(clicker['participants_clicks'])}\n\n"
+                       f"**Ваш личный счёт:** {clicker['participants_clicks'][interaction.user.id]} кликов",
+            color=discord.Color.purple()
+        )
+        embed.set_footer(text=f"Создал: {clicker['creator_name']} | Конкурс идёт!")
+        embed.timestamp = clicker["end_time"]
+        await interaction.message.edit(embed=embed)
+        
+        await interaction.response.send_message(f"✅ Вы кликнули! Всего кликов: {clicker['current_clicks']}\nВаш личный счёт: {clicker['participants_clicks'][interaction.user.id]} кликов", ephemeral=True)
 
 
 # ================== РОЗЫГРЫШИ ==================
@@ -1232,7 +1276,8 @@ async def help_command(interaction: discord.Interaction):
             "`/invites` - Ваша статистика приглашений\n"
             "`/top` - Топ 10 инвайтеров\n"
             "`/server` - Статистика сервера\n"
-            "`/tag` - Проверить наличие тега и получить роль"
+            "`/tag` - Проверить наличие тега и получить роль\n"
+            "`/mptime` - Посмотреть все запланированные конкурсы"
         ),
         inline=False
     )
@@ -1245,8 +1290,9 @@ async def help_command(interaction: discord.Interaction):
             "`/greroll <message_id>` - Перевыбрать победителей\n"
             "`/gdelete <message_id>` - Удалить розыгрыш\n"
             "`/gmp <приз>` - Запустить игру 'Угадай число'\n"
-            "`/gclick` - Создать кликер-розыгрыш\n"
-            "`/gclicktop` - Создать кликер-конкурс"
+            "`/gclicktop` - Создать кликер-конкурс\n"
+            "`/setgmptime` - Запланировать 'Угадай число' на время (МСК)\n"
+            "`/setgclicktoptime` - Запланировать кликер-конкурс на время (МСК)"
         ),
         inline=False
     )
@@ -1264,12 +1310,14 @@ async def help_command(interaction: discord.Interaction):
             name="👑 Административные команды",
             value=(
                 "`/say` - Отправить сообщение от имени бота\n"
+                "`/agit` - Отправить новость всем в ЛС\n"
                 "`/giveinvites <user> <amount>` - Выдать инвайты\n"
                 "`/takeinvites <user> <amount>` - Забрать инвайты\n"
                 "`/reset_user <user>` - Сбросить статистику\n"
                 "`/sync` - Синхронизировать команды\n"
                 "`/successful <order_number>` - Отметить заказ выполненным\n"
-                "`/stats <user>` - Полная статистика игрока"
+                "`/stats <user>` - Полная статистика игрока\n"
+                "`/ban <user> [время] <причина>` - Забанить пользователя"
             ),
             inline=False
         )
@@ -1277,16 +1325,427 @@ async def help_command(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="gclick", description="🎮 Создать кликер-розыгрыш (скрытый победный клик)")
-async def gclick_command(interaction: discord.Interaction):
-    if not has_permission(interaction):
-        await interaction.response.send_message("❌ У вас нет прав! Требуется роль или права администратора.", ephemeral=True)
+# ================== КОМАНДА /AGIT (РАССЫЛКА В ЛС) ==================
+class AgitModal(Modal, title="📢 Рассылка новости всем игрокам"):
+    message = TextInput(
+        label="📝 Текст новости",
+        placeholder="Введите текст, который увидят все игроки в ЛС...",
+        required=True,
+        style=discord.TextStyle.paragraph,
+        max_length=2000
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+            return
+        
+        await interaction.response.send_message("📢 Начинаю рассылку... Это может занять некоторое время.", ephemeral=True)
+        
+        success_count = 0
+        fail_count = 0
+        
+        for member in interaction.guild.members:
+            if member.bot:
+                continue
+            try:
+                embed = discord.Embed(
+                    title="📢 **НОВОСТЬ ОТ АДМИНИСТРАЦИИ**",
+                    description=self.message.value,
+                    color=discord.Color.blue(),
+                    timestamp=datetime.now()
+                )
+                embed.set_footer(text=f"Сервер {interaction.guild.name}")
+                await member.send(embed=embed)
+                success_count += 1
+                await asyncio.sleep(0.5)  # Чтобы не попасть под rate limit
+            except:
+                fail_count += 1
+        
+        await interaction.followup.send(f"✅ Рассылка завершена!\n📨 Доставлено: {success_count}\n❌ Не доставлено: {fail_count}", ephemeral=True)
+        
+        log_channel = bot.get_channel(LOG_CHANNEL_ID)
+        if log_channel:
+            await log_channel.send(f"📢 {interaction.user.name} отправил рассылку всем игрокам. Доставлено: {success_count}, Не доставлено: {fail_count}")
+
+
+@bot.tree.command(name="agit", description="📢 Отправить новость всем игрокам в личные сообщения (только админы)")
+async def agit_command(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
         return
     
-    modal = ClickerModal()
+    modal = AgitModal()
     await interaction.response.send_modal(modal)
 
 
+# ================== КОМАНДА /BAN ==================
+@bot.tree.command(name="ban", description="🔨 Забанить пользователя (навсегда или на время)")
+@app_commands.describe(
+    user="Пользователь для бана",
+    duration="Время бана (например: 1д, 2ч, 30м) - оставьте пустым для вечного бана",
+    reason="Причина бана"
+)
+async def ban_command(interaction: discord.Interaction, user: discord.Member, reason: str, duration: Optional[str] = None):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+        return
+    
+    if user == interaction.user:
+        await interaction.response.send_message("❌ Вы не можете забанить самого себя!", ephemeral=True)
+        return
+    
+    if user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ Вы не можете забанить администратора!", ephemeral=True)
+        return
+    
+    ban_end = None
+    duration_text = "навсегда"
+    
+    if duration:
+        seconds = 0
+        if duration.endswith("д"):
+            seconds = int(duration[:-1]) * 86400
+        elif duration.endswith("ч"):
+            seconds = int(duration[:-1]) * 3600
+        elif duration.endswith("м"):
+            seconds = int(duration[:-1]) * 60
+        else:
+            await interaction.response.send_message("❌ Неверный формат времени! Используйте: 1д, 2ч, 30м", ephemeral=True)
+            return
+        
+        if seconds <= 0:
+            await interaction.response.send_message("❌ Время должно быть положительным!", ephemeral=True)
+            return
+        
+        ban_end = datetime.now() + timedelta(seconds=seconds)
+        duration_text = f"до {ban_end.strftime('%d.%m.%Y %H:%M')} МСК"
+    
+    try:
+        await user.ban(reason=f"{reason} | Забанил: {interaction.user.name}")
+        
+        async with aiosqlite.connect("db.sqlite3") as db:
+            await db.execute("""
+            INSERT OR REPLACE INTO banned_users (user_id, reason, ban_end, banned_by, ban_date)
+            VALUES (?, ?, ?, ?, datetime('now'))
+            """, (user.id, reason, ban_end.isoformat() if ban_end else None, interaction.user.id))
+            await db.commit()
+        
+        # Отправка в ЛС пользователю
+        try:
+            embed_dm = discord.Embed(
+                title="🔨 **ВЫ ЗАБАНЕНЫ НА СЕРВЕРЕ**",
+                description=f"**Сервер:** {interaction.guild.name}\n"
+                           f"**Причина:** {reason}\n"
+                           f"**Срок:** {duration_text}\n"
+                           f"**Кто забанил:** {interaction.user.name}",
+                color=discord.Color.red(),
+                timestamp=datetime.now()
+            )
+            await user.send(embed=embed_dm)
+        except:
+            pass
+        
+        embed = discord.Embed(
+            title="✅ Пользователь забанен",
+            description=f"**Пользователь:** {user.mention}\n"
+                       f"**Причина:** {reason}\n"
+                       f"**Срок:** {duration_text}",
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed)
+        
+        log_channel = bot.get_channel(LOG_CHANNEL_ID)
+        if log_channel:
+            await log_channel.send(f"🔨 {interaction.user.name} забанил {user.name} | Причина: {reason} | Срок: {duration_text}")
+        
+        # Если бан временный - планируем разбан
+        if ban_end:
+            asyncio.create_task(auto_unban(user.id, ban_end, interaction.guild.id, reason))
+            
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Ошибка при бане: {e}", ephemeral=True)
+
+
+async def auto_unban(user_id: int, unban_time: datetime, guild_id: int, reason: str):
+    wait_seconds = (unban_time - datetime.now()).total_seconds()
+    if wait_seconds > 0:
+        await asyncio.sleep(wait_seconds)
+    
+    guild = bot.get_guild(guild_id)
+    if not guild:
+        return
+    
+    try:
+        user = await bot.fetch_user(user_id)
+        await guild.unban(user)
+        
+        async with aiosqlite.connect("db.sqlite3") as db:
+            await db.execute("DELETE FROM banned_users WHERE user_id = ?", (user_id,))
+            await db.commit()
+        
+        try:
+            embed_dm = discord.Embed(
+                title="🔓 **СРОК БАНА ИСТЕК**",
+                description=f"**Сервер:** {guild.name}\n"
+                           f"**Вы были разбанены.**\n"
+                           f"**Причина бана была:** {reason}",
+                color=discord.Color.green(),
+                timestamp=datetime.now()
+            )
+            await user.send(embed=embed_dm)
+        except:
+            pass
+        
+        log_channel = bot.get_channel(LOG_CHANNEL_ID)
+        if log_channel:
+            await log_channel.send(f"🔓 Автоматический разбан пользователя {user.name} (ID: {user_id})")
+    except:
+        pass
+
+
+# ================== КОМАНДА /SETGMPTIME (ЗАПЛАНИРОВАТЬ УГАДАЙ ЧИСЛО) ==================
+class SetGmpTimeModal(Modal, title="📅 Запланировать игру 'Угадай число'"):
+    time_input = TextInput(
+        label="⏰ Время (МСК, формат: ДД.ММ ГГ:ММ)",
+        placeholder="Например: 25.12 15:30",
+        required=True,
+        max_length=20
+    )
+    prize = TextInput(
+        label="🎁 ПРИЗ",
+        placeholder="Что выиграет победитель?",
+        required=True,
+        max_length=200
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not has_permission(interaction):
+            await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+            return
+        
+        if len(scheduled_games) >= 5:
+            await interaction.response.send_message("❌ Очередь запланированных игр заполнена (максимум 5)! Подождите, пока пройдут текущие.", ephemeral=True)
+            return
+        
+        try:
+            # Парсим время: ДД.ММ ЧЧ:ММ
+            parts = self.time_input.value.split()
+            if len(parts) != 2:
+                raise ValueError
+            date_parts = parts[0].split('.')
+            if len(date_parts) != 2:
+                raise ValueError
+            time_parts = parts[1].split(':')
+            if len(time_parts) != 2:
+                raise ValueError
+            
+            day = int(date_parts[0])
+            month = int(date_parts[1])
+            hour = int(time_parts[0])
+            minute = int(time_parts[1])
+            
+            now = datetime.now()
+            year = now.year
+            
+            game_time = datetime(year, month, day, hour, minute)
+            
+            # Если время уже прошло в этом году - переносим на следующий год
+            if game_time < now:
+                game_time = datetime(year + 1, month, day, hour, minute)
+            
+            # Проверяем, что время не слишком далеко (максимум 30 дней)
+            if (game_time - now).days > 30:
+                await interaction.response.send_message("❌ Нельзя планировать игру более чем на 30 дней вперёд!", ephemeral=True)
+                return
+            
+            game_id = await save_scheduled_game("guess", game_time, self.prize.value, interaction.user.id, interaction.user.display_name)
+            
+            scheduled_games.append({
+                "id": game_id,
+                "type": "guess",
+                "time": game_time,
+                "prize": self.prize.value,
+                "creator_id": interaction.user.id,
+                "creator_name": interaction.user.display_name
+            })
+            
+            # Сортируем по времени
+            scheduled_games.sort(key=lambda x: x["time"])
+            
+            embed = discord.Embed(
+                title="✅ Игра запланирована!",
+                description=f"**Тип:** Угадай число\n"
+                           f"**Приз:** {self.prize.value}\n"
+                           f"**Время:** {game_time.strftime('%d.%m.%Y в %H:%M')} МСК\n\n"
+                           f"Игра автоматически запустится в указанное время в канале <#{GUESS_CHANNEL_ID}>",
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=embed)
+            
+            log_channel = bot.get_channel(LOG_CHANNEL_ID)
+            if log_channel:
+                await log_channel.send(f"📅 {interaction.user.name} запланировал игру 'Угадай число' на {game_time.strftime('%d.%m.%Y %H:%M')} МСК с призом: {self.prize.value}")
+                
+        except ValueError:
+            await interaction.response.send_message("❌ Неверный формат времени! Используйте: `ДД.ММ ЧЧ:ММ` (например: 25.12 15:30)", ephemeral=True)
+
+
+@bot.tree.command(name="setgmptime", description="📅 Запланировать игру 'Угадай число' на определённое время (МСК)")
+async def setgmptime_command(interaction: discord.Interaction):
+    if not has_permission(interaction):
+        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+        return
+    
+    modal = SetGmpTimeModal()
+    await interaction.response.send_modal(modal)
+
+
+# ================== КОМАНДА /SETGCLICKTOPTIME (ЗАПЛАНИРОВАТЬ КЛИКЕР) ==================
+class SetGclickTopTimeModal(Modal, title="📅 Запланировать кликер-конкурс"):
+    time_input = TextInput(
+        label="⏰ Время (МСК, формат: ДД.ММ ГГ:ММ)",
+        placeholder="Например: 25.12 15:30",
+        required=True,
+        max_length=20
+    )
+    prize = TextInput(
+        label="🎁 ПРИЗ",
+        placeholder="Что выиграет победитель?",
+        required=True,
+        max_length=200
+    )
+    duration = TextInput(
+        label="⏰ Длительность конкурса (минуты)",
+        placeholder="Например: 10",
+        required=True,
+        max_length=3
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not has_permission(interaction):
+            await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+            return
+        
+        if len(scheduled_games) >= 5:
+            await interaction.response.send_message("❌ Очередь запланированных игр заполнена (максимум 5)! Подождите, пока пройдут текущие.", ephemeral=True)
+            return
+        
+        try:
+            # Парсим время
+            parts = self.time_input.value.split()
+            if len(parts) != 2:
+                raise ValueError
+            date_parts = parts[0].split('.')
+            if len(date_parts) != 2:
+                raise ValueError
+            time_parts = parts[1].split(':')
+            if len(time_parts) != 2:
+                raise ValueError
+            
+            day = int(date_parts[0])
+            month = int(date_parts[1])
+            hour = int(time_parts[0])
+            minute = int(time_parts[1])
+            
+            duration_minutes = int(self.duration.value)
+            if duration_minutes < 1 or duration_minutes > 60:
+                await interaction.response.send_message("❌ Длительность должна быть от 1 до 60 минут!", ephemeral=True)
+                return
+            
+            now = datetime.now()
+            year = now.year
+            
+            game_time = datetime(year, month, day, hour, minute)
+            
+            if game_time < now:
+                game_time = datetime(year + 1, month, day, hour, minute)
+            
+            if (game_time - now).days > 30:
+                await interaction.response.send_message("❌ Нельзя планировать игру более чем на 30 дней вперёд!", ephemeral=True)
+                return
+            
+            game_id = await save_scheduled_game("clicktop", game_time, self.prize.value, interaction.user.id, interaction.user.display_name)
+            
+            scheduled_games.append({
+                "id": game_id,
+                "type": "clicktop",
+                "time": game_time,
+                "prize": self.prize.value,
+                "creator_id": interaction.user.id,
+                "creator_name": interaction.user.display_name
+            })
+            
+            scheduled_games.sort(key=lambda x: x["time"])
+            
+            embed = discord.Embed(
+                title="✅ Кликер-конкурс запланирован!",
+                description=f"**Тип:** Кликер-конкурс (кто больше кликнет за {duration_minutes} минут)\n"
+                           f"**Приз:** {self.prize.value}\n"
+                           f"**Время старта:** {game_time.strftime('%d.%m.%Y в %H:%M')} МСК\n\n"
+                           f"Конкурс автоматически запустится в указанное время в канале <#{GUESS_CHANNEL_ID}>",
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=embed)
+            
+            log_channel = bot.get_channel(LOG_CHANNEL_ID)
+            if log_channel:
+                await log_channel.send(f"📅 {interaction.user.name} запланировал кликер-конкурс на {game_time.strftime('%d.%m.%Y %H:%M')} МСК с призом: {self.prize.value}")
+                
+        except ValueError:
+            await interaction.response.send_message("❌ Неверный формат времени или длительности! Используйте: время `ДД.ММ ЧЧ:ММ`, длительность число минут", ephemeral=True)
+
+
+@bot.tree.command(name="setgclicktoptime", description="📅 Запланировать кликер-конкурс на определённое время (МСК)")
+async def setgclicktoptime_command(interaction: discord.Interaction):
+    if not has_permission(interaction):
+        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+        return
+    
+    modal = SetGclickTopTimeModal()
+    await interaction.response.send_modal(modal)
+
+
+# ================== КОМАНДА /MPTIME (ПОКАЗАТЬ ОЧЕРЕДЬ) ==================
+@bot.tree.command(name="mptime", description="📅 Показать все запланированные конкурсы")
+async def mptime_command(interaction: discord.Interaction):
+    if not scheduled_games:
+        embed = discord.Embed(
+            title="📅 Запланированные конкурсы",
+            description="В настоящее время нет запланированных конкурсов.",
+            color=discord.Color.blue()
+        )
+        await interaction.response.send_message(embed=embed)
+        return
+    
+    embed = discord.Embed(
+        title="📅 ЗАПЛАНИРОВАННЫЕ КОНКУРСЫ",
+        description=f"Всего в очереди: {len(scheduled_games)}/5",
+        color=discord.Color.purple()
+    )
+    
+    type_names = {
+        "guess": "🎲 Угадай число",
+        "clicktop": "🎮 Кликер-конкурс"
+    }
+    
+    for i, game in enumerate(scheduled_games, 1):
+        game_time = game["time"]
+        time_str = game_time.strftime("%d.%m.%Y в %H:%M МСК")
+        
+        embed.add_field(
+            name=f"{i}. {type_names.get(game['type'], game['type'])}",
+            value=f"**Приз:** {game['prize']}\n"
+                  f"**Время:** {time_str}\n"
+                  f"**Создал:** {game['creator_name']}",
+            inline=False
+        )
+    
+    embed.set_footer(text=f"Конкурсы проходят в канале <#{GUESS_CHANNEL_ID}> | Всего мест в очереди: 5")
+    await interaction.response.send_message(embed=embed)
+
+
+# ================== ОСТАЛЬНЫЕ КОМАНДЫ ==================
 @bot.tree.command(name="gclicktop", description="🏆 Создать кликер-конкурс (кто больше кликнет за время)")
 async def gclicktop_command(interaction: discord.Interaction):
     if not has_permission(interaction):
@@ -1822,8 +2281,8 @@ async def slash_gmp(interaction: discord.Interaction, prize: str):
         description=(
             f"**Ваша задача отгадать число от 1 до 100.**\n\n"
             f"**Приз:** {prize}\n\n"
-            f"**Ответ отправьте в** <#{GUESS_CHANNEL_ID}>\n"
-            f"<@&{ALLOWED_ROLE_ID}>"
+            f"**Ответ отправьте в этот канал**\n"
+            f"<@&{GAME_ANNOUNCE_ROLE_ID}>"
         ),
         color=discord.Color.purple()
     )
@@ -1858,6 +2317,7 @@ async def on_ready():
     await init_db()
     await migrate_db()
     await load_completed_giveaways()
+    await load_scheduled_games()
     
     try:
         guild = discord.Object(id=GUILD_ID)
@@ -1881,7 +2341,9 @@ async def on_ready():
             print(f"❌ Ошибка загрузки инвайтов: {e}")
 
     print(f"✅ Бот запущен: {bot.user}")
-    await bot.change_presence(activity=discord.Game(name="/help | /shop | /gcreate | /gclick | /gclicktop | /createmenu | /tag"))
+    await bot.change_presence(activity=discord.Game(name="/help | /shop | /gcreate | /gclicktop | /createmenu | /tag | /mptime"))
+    
+    asyncio.create_task(check_scheduled_games())
 
 
 @bot.event
