@@ -1324,60 +1324,63 @@ async def help_command(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed)
 
-
 # ================== КОМАНДА /AGIT (РАССЫЛКА В ЛС) ==================
-class AgitModal(Modal, title="📢 Рассылка новости всем игрокам"):
-    message = TextInput(
-        label="📝 Текст новости",
-        placeholder="Введите текст, который увидят все игроки в ЛС...",
-        required=True,
-        style=discord.TextStyle.paragraph,
-        max_length=2000
-    )
-
-    async def on_submit(self, interaction: discord.Interaction):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
-            return
-        
-        await interaction.response.send_message("📢 Начинаю рассылку... Это может занять некоторое время.", ephemeral=True)
-        
-        success_count = 0
-        fail_count = 0
-        
-        for member in interaction.guild.members:
-            if member.bot:
-                continue
-            try:
-                embed = discord.Embed(
-                    title="📢 **НОВОСТЬ ОТ АДМИНИСТРАЦИИ**",
-                    description=self.message.value,
-                    color=discord.Color.blue(),
-                    timestamp=datetime.now()
-                )
-                embed.set_footer(text=f"Сервер {interaction.guild.name}")
-                await member.send(embed=embed)
-                success_count += 1
-                await asyncio.sleep(0.5)  # Чтобы не попасть под rate limit
-            except:
-                fail_count += 1
-        
-        await interaction.followup.send(f"✅ Рассылка завершена!\n📨 Доставлено: {success_count}\n❌ Не доставлено: {fail_count}", ephemeral=True)
-        
-        log_channel = bot.get_channel(LOG_CHANNEL_ID)
-        if log_channel:
-            await log_channel.send(f"📢 {interaction.user.name} отправил рассылку всем игрокам. Доставлено: {success_count}, Не доставлено: {fail_count}")
-
-
 @bot.tree.command(name="agit", description="📢 Отправить новость всем игрокам в личные сообщения (только админы)")
 async def agit_command(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
         return
     
+    # Создаем модальное окно прямо здесь, без отдельного класса
+    class AgitModal(Modal, title="📢 Рассылка новости всем игрокам"):
+        message = TextInput(
+            label="📝 Текст новости",
+            placeholder="Введите текст, который увидят все игроки в ЛС...",
+            required=True,
+            style=discord.TextStyle.paragraph,
+            max_length=2000
+        )
+        
+        async def on_submit(self, modal_interaction: discord.Interaction):
+            await modal_interaction.response.send_message("📢 Начинаю рассылку... Это может занять некоторое время.", ephemeral=True)
+            
+            success_count = 0
+            fail_count = 0
+            members_list = [m for m in modal_interaction.guild.members if not m.bot]
+            
+            embed = discord.Embed(
+                title="📢 **НОВОСТЬ ОТ АДМИНИСТРАЦИИ**",
+                description=self.message.value,
+                color=discord.Color.blue(),
+                timestamp=datetime.now()
+            )
+            embed.set_footer(text=f"Сервер {modal_interaction.guild.name}")
+            
+            for member in members_list:
+                try:
+                    await member.send(embed=embed)
+                    success_count += 1
+                    await asyncio.sleep(0.3)  # Защита от rate limit
+                except discord.Forbidden:
+                    fail_count += 1  # Пользователь закрыл ЛС
+                except Exception as e:
+                    fail_count += 1
+                    print(f"Ошибка отправки {member.name}: {e}")
+            
+            result_embed = discord.Embed(
+                title="✅ Рассылка завершена!",
+                description=f"📨 **Доставлено:** {success_count}\n❌ **Не доставлено:** {fail_count}\n\n"
+                           f"*Некоторые пользователи могли отключить личные сообщения.*",
+                color=discord.Color.green()
+            )
+            await modal_interaction.followup.send(embed=result_embed, ephemeral=True)
+            
+            log_channel = bot.get_channel(LOG_CHANNEL_ID)
+            if log_channel:
+                await log_channel.send(f"📢 {modal_interaction.user.name} отправил рассылку. Доставлено: {success_count}, Не доставлено: {fail_count}")
+    
     modal = AgitModal()
     await interaction.response.send_modal(modal)
-
 
 # ================== КОМАНДА /BAN ==================
 @bot.tree.command(name="ban", description="🔨 Забанить пользователя (навсегда или на время)")
