@@ -30,14 +30,14 @@ def ping():
     return "pong", 200
 
 def run():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    port = int(os.environ.get("PORT", 8080))  # Изменено с 10000 на 8080
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 def keep_alive():
     server = Thread(target=run)
     server.daemon = True
     server.start()
-    print(f"🌐 Веб-сервер для keep-alive запущен на порту {os.environ.get('PORT', 10000)}")
+    print(f"🌐 Веб-сервер для keep-alive запущен на порту {os.environ.get('PORT', 8080)}")
 
 # ================== КОНФИГУРАЦИЯ ==================
 TOKEN = os.getenv("TOKEN")
@@ -56,13 +56,20 @@ TARGET_ROLE_FOR_TAG_ID = 1489575333718921428
 GUESS_CHANNEL_ID = 1484247093299118262
 WINNER_CHANNEL_ID = 1372910944472006706
 ALLOWED_ROLE_ID = 1490014283164160201
-VERIFY_ROLE_ID = 1450431350313058444  # Роль для упоминания при запуске конкурсов
+VERIFY_ROLE_ID = 1450431350313058444
 
 if not TOKEN:
     print("❌ ОШИБКА: Токен не найден!")
     exit(1)
 
-intents = discord.Intents.all()
+# Уменьшаем интенты для стабильности
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+intents.guilds = True
+intents.guild_messages = True
+intents.dm_messages = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Кэши и переменные
@@ -2705,6 +2712,10 @@ if __name__ == "__main__":
         
         # Запуск веб-сервера в отдельном потоке
         keep_alive()
+        
+        # Небольшая задержка перед подключением к Discord
+        import time
+        time.sleep(2)
         
         # Запуск бота
         print("🤖 Подключение к Discord API...")
