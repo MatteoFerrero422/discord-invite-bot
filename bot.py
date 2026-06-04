@@ -53,10 +53,10 @@ TAG_ROLE_ID = 1489575333718921428
 TARGET_ROLE_FOR_TAG_ID = 1489575333718921428
 
 # Конфиг для розыгрышей и игр
-GUESS_CHANNEL_ID = 1484179478044479678  # Изменено на канал для игр
+GUESS_CHANNEL_ID = 1484247093299118262
 WINNER_CHANNEL_ID = 1372910944472006706
 ALLOWED_ROLE_ID = 1490014283164160201
-GAME_ANNOUNCE_ROLE_ID = 1450431350313058444  # Роль для тега в анонсах
+VERIFY_ROLE_ID = 1450431350313058444  # Роль для упоминания при запуске конкурсов
 
 if not TOKEN:
     print("❌ ОШИБКА: Токен не найден!")
@@ -75,7 +75,7 @@ active_clickers: Dict[str, dict] = {}
 last_invite_check = {}
 
 # Очередь запланированных игр (максимум 5)
-scheduled_games: List[dict] = []  # Каждый элемент: {"type": "guess" или "clicktop", "time": datetime, "prize": str, "creator_id": int, "creator_name": str}
+scheduled_games: List[dict] = []
 
 # ================== БАЗА ДАННЫХ ==================
 async def init_db():
@@ -178,7 +178,8 @@ async def init_db():
             game_time TEXT,
             prize TEXT,
             creator_id INTEGER,
-            creator_name TEXT
+            creator_name TEXT,
+            target_number INTEGER
         )
         """)
         
@@ -294,6 +295,24 @@ async def get_invites_count(user_id):
         return data[0] - data[1] - data[2]
     return 0
 
+async def add_invites(user_id: int, amount: int):
+    async with aiosqlite.connect("db.sqlite3") as db:
+        await db.execute("""
+        INSERT INTO users (user_id, invited, total_invites)
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET 
+            invited = invited + ?,
+            total_invites = total_invites + ?
+        """, (user_id, amount, amount, amount, amount))
+        await db.commit()
+
+async def remove_invites(user_id: int, amount: int):
+    async with aiosqlite.connect("db.sqlite3") as db:
+        await db.execute("""
+        UPDATE users SET spent = spent + ? WHERE user_id=?
+        """, (amount, user_id))
+        await db.commit()
+
 async def get_giveaway_invites_count(giveaway_key: str, user_id: int):
     async with aiosqlite.connect("db.sqlite3") as db:
         cursor = await db.execute(
@@ -314,12 +333,12 @@ async def add_giveaway_invite(giveaway_key: str, inviter_id: int, invited_user_i
 async def load_scheduled_games():
     global scheduled_games
     async with aiosqlite.connect("db.sqlite3") as db:
-        cursor = await db.execute("SELECT id, type, game_time, prize, creator_id, creator_name FROM scheduled_games ORDER BY game_time ASC")
+        cursor = await db.execute("SELECT id, type, game_time, prize, creator_id, creator_name, target_number FROM scheduled_games ORDER BY game_time ASC")
         rows = await cursor.fetchall()
         scheduled_games = []
         now = datetime.now()
         for row in rows:
-            game_id, game_type, game_time_str, prize, creator_id, creator_name = row
+            game_id, game_type, game_time_str, prize, creator_id, creator_name, target_number = row
             game_time = datetime.fromisoformat(game_time_str)
             if game_time > now:
                 scheduled_games.append({
@@ -328,16 +347,17 @@ async def load_scheduled_games():
                     "time": game_time,
                     "prize": prize,
                     "creator_id": creator_id,
-                    "creator_name": creator_name
+                    "creator_name": creator_name,
+                    "target_number": target_number
                 })
         print(f"📅 Загружено {len(scheduled_games)} запланированных игр")
 
-async def save_scheduled_game(game_type: str, game_time: datetime, prize: str, creator_id: int, creator_name: str):
+async def save_scheduled_game(game_type: str, game_time: datetime, prize: str, creator_id: int, creator_name: str, target_number: int = None):
     async with aiosqlite.connect("db.sqlite3") as db:
         cursor = await db.execute("""
-        INSERT INTO scheduled_games (type, game_time, prize, creator_id, creator_name)
-        VALUES (?, ?, ?, ?, ?)
-        """, (game_type, game_time.isoformat(), prize, creator_id, creator_name))
+        INSERT INTO scheduled_games (type, game_time, prize, creator_id, creator_name, target_number)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """, (game_type, game_time.isoformat(), prize, creator_id, creator_name, target_number))
         await db.commit()
         game_id = cursor.lastrowid
     return game_id
@@ -362,7 +382,7 @@ async def check_scheduled_games():
             await delete_scheduled_game(game["id"])
             scheduled_games.remove(game)
         
-        await asyncio.sleep(30)  # Проверка каждые 30 секунд
+        await asyncio.sleep(30)
 
 async def start_scheduled_guess_game(game: dict):
     channel = bot.get_channel(GUESS_CHANNEL_ID)
@@ -370,15 +390,18 @@ async def start_scheduled_guess_game(game: dict):
         print(f"❌ Канал {GUESS_CHANNEL_ID} не найден для игры 'Угадай число'")
         return
     
-    target_number = random.randint(1, 100)
+    target_number = game.get("target_number")
+    if target_number is None:
+        target_number = random.randint(1, 100)
+    
+    await channel.send(f"<@&{VERIFY_ROLE_ID}> 🎲 **ВНИМАНИЕ! НАЧИНАЕТСЯ ИГРА 'УГАДАЙ ЧИСЛО'!**")
     
     embed = discord.Embed(
         title="🎲 **УГАДАЙ ЧИСЛО** 🎲",
         description=(
             f"**Ваша задача отгадать число от 1 до 100.**\n\n"
             f"**Приз:** {game['prize']}\n\n"
-            f"**Ответ отправьте в этот канал**\n"
-            f"<@&{GAME_ANNOUNCE_ROLE_ID}>"
+            f"**Ответ отправьте в этот канал**"
         ),
         color=discord.Color.purple()
     )
@@ -386,13 +409,18 @@ async def start_scheduled_guess_game(game: dict):
     
     await channel.send(embed=embed)
     
-    active_guess_games[GUESS_CHANNEL_ID] = GuessNumberGame(
-        GUESS_CHANNEL_ID, target_number, game['prize']
-    )
+    active_guess_games[GUESS_CHANNEL_ID] = {
+        "target": target_number,
+        "prize": game['prize'],
+        "active": True,
+        "winner": None,
+        "start_time": datetime.now(),
+        "creator_name": game['creator_name']
+    }
     
     log_channel = bot.get_channel(LOG_CHANNEL_ID)
     if log_channel:
-        await log_channel.send(f"🎲 Автоматически запущена игра 'Угадай число' с призом: {game['prize']}")
+        await log_channel.send(f"🎲 Автоматически запущена игра 'Угадай число' с призом: {game['prize']} и числом: {target_number}")
 
 async def start_scheduled_clicktop_game(game: dict):
     channel = bot.get_channel(GUESS_CHANNEL_ID)
@@ -400,7 +428,7 @@ async def start_scheduled_clicktop_game(game: dict):
         print(f"❌ Канал {GUESS_CHANNEL_ID} не найден для кликер-конкурса")
         return
     
-    duration_minutes = 10  # Длительность по умолчанию 10 минут
+    duration_minutes = 10
     end_time = datetime.now() + timedelta(minutes=duration_minutes)
     clicker_id = f"top_{channel.id}_{datetime.now().timestamp()}"
     
@@ -419,6 +447,8 @@ async def start_scheduled_clicktop_game(game: dict):
     }
     
     active_clickers[clicker_id] = clicker_data
+    
+    await channel.send(f"<@&{VERIFY_ROLE_ID}> 🎮 **ВНИМАНИЕ! НАЧИНАЕТСЯ КЛИКЕР-КОНКУРС!**")
     
     embed = discord.Embed(
         title="🎮 КЛИКЕР-КОНКУРС!",
@@ -542,6 +572,7 @@ async def tag_command(interaction: discord.Interaction):
     if has_tag:
         if target_role not in interaction.user.roles:
             await interaction.user.add_roles(target_role)
+            
             embed = discord.Embed(
                 title="🏷️ Роль выдана!",
                 description=f"У вас обнаружен тег! Вам выдана роль {target_role.mention}.\n\n"
@@ -576,6 +607,108 @@ async def tag_command(interaction: discord.Interaction):
             color=discord.Color.orange()
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# ================== КОМАНДА /TOSS ==================
+class TossView(View):
+    def __init__(self, user_id: int, bet: int):
+        super().__init__(timeout=60)
+        self.user_id = user_id
+        self.bet = bet
+        self.result = None
+    
+    @discord.ui.button(label="🦅 ОРЁЛ", style=discord.ButtonStyle.green, custom_id="toss_eagle")
+    async def eagle_button(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Это не ваша игра!", ephemeral=True)
+            return
+        self.result = "орёл"
+        await self.process_toss(interaction)
+    
+    @discord.ui.button(label="🪙 РЕШКА", style=discord.ButtonStyle.blurple, custom_id="toss_tails")
+    async def tails_button(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Это не ваша игра!", ephemeral=True)
+            return
+        self.result = "решка"
+        await self.process_toss(interaction)
+    
+    async def process_toss(self, interaction: discord.Interaction):
+        for child in self.children:
+            child.disabled = True
+        await interaction.message.edit(view=self)
+        
+        outcomes = ["орёл", "решка"]
+        toss_result = random.choice(outcomes)
+        
+        current_invites = await get_invites_count(self.user_id)
+        
+        if current_invites < self.bet:
+            await interaction.response.edit_message(
+                content=f"❌ У вас недостаточно инвайтов для игры! Нужно: {self.bet}, у вас: {current_invites}",
+                view=None
+            )
+            return
+        
+        if toss_result == self.result:
+            await add_invites(self.user_id, self.bet)
+            new_balance = await get_invites_count(self.user_id)
+            
+            embed = discord.Embed(
+                title="🎲 **ОРЁЛ/РЕШКА** 🎲",
+                description=f"**Вы выбрали:** {self.result.upper()}\n"
+                           f"**Выпало:** {toss_result.upper()}\n\n"
+                           f"**Результат:** 🎉 **ВЫ ВЫИГРАЛИ!** 🎉\n\n"
+                           f"**Ставка:** {self.bet} инвайтов\n"
+                           f"**Выигрыш:** +{self.bet} инвайтов\n"
+                           f"**Ваш баланс:** {new_balance} инвайтов",
+                color=discord.Color.green()
+            )
+            await interaction.response.edit_message(embed=embed, view=None)
+            
+            log_channel = bot.get_channel(LOG_CHANNEL_ID)
+            if log_channel:
+                await log_channel.send(f"🎲 {interaction.user.name} выиграл в Орёл/Решка! Ставка: {self.bet}, Выигрыш: +{self.bet}")
+        else:
+            await remove_invites(self.user_id, self.bet)
+            new_balance = await get_invites_count(self.user_id)
+            
+            embed = discord.Embed(
+                title="🎲 **ОРЁЛ/РЕШКА** 🎲",
+                description=f"**Вы выбрали:** {self.result.upper()}\n"
+                           f"**Выпало:** {toss_result.upper()}\n\n"
+                           f"**Результат:** 😔 **ВЫ ПРОИГРАЛИ** 😔\n\n"
+                           f"**Ставка:** {self.bet} инвайтов\n"
+                           f"**Потеряно:** -{self.bet} инвайтов\n"
+                           f"**Ваш баланс:** {new_balance} инвайтов",
+                color=discord.Color.red()
+            )
+            await interaction.response.edit_message(embed=embed, view=None)
+            
+            log_channel = bot.get_channel(LOG_CHANNEL_ID)
+            if log_channel:
+                await log_channel.send(f"🎲 {interaction.user.name} проиграл в Орёл/Решка! Ставка: {self.bet}")
+
+
+@bot.tree.command(name="toss", description="🎲 Сыграть в Орёл/Решка (ставка 1 инвайт)")
+async def toss_command(interaction: discord.Interaction):
+    bet = 1
+    
+    current_invites = await get_invites_count(interaction.user.id)
+    
+    if current_invites < bet:
+        await interaction.response.send_message(f"❌ У вас недостаточно инвайтов! Нужно: {bet}, у вас: {current_invites}", ephemeral=True)
+        return
+    
+    embed = discord.Embed(
+        title="🎲 **ОРЁЛ/РЕШКА** 🎲",
+        description=f"**Ставка:** {bet} инвайт\n\n"
+                   f"**Выберите сторону:**",
+        color=discord.Color.gold()
+    )
+    
+    view = TossView(interaction.user.id, bet)
+    await interaction.response.send_message(embed=embed, view=view)
 
 
 # ================== КОМАНДА /SAY ==================
@@ -682,7 +815,7 @@ class MembersPaginator(View):
             await interaction.response.send_message("Это последняя страница!", ephemeral=True)
 
 
-# ================== КЛИКЕР-КОНКУРС (без скрытого клика) ==================
+# ================== КЛИКЕР-КОНКУРС ==================
 class ClickerTopModal(Modal, title="🎮 Создание кликер-конкурса (на время)"):
     prize = TextInput(label="🎁 ПРИЗ", placeholder="Что выигрывает победитель?", required=True, max_length=200)
     duration = TextInput(label="⏰ Длительность (в минутах)", placeholder="Например: 5, 10, 30", required=True)
@@ -720,6 +853,8 @@ class ClickerTopModal(Modal, title="🎮 Создание кликер-конк�
         
         active_clickers[clicker_id] = clicker_data
         
+        await interaction.response.send_message(f"<@&{VERIFY_ROLE_ID}> 🎮 **ВНИМАНИЕ! НАЧИНАЕТСЯ КЛИКЕР-КОНКУРС!**")
+        
         embed = discord.Embed(
             title="🎮 КЛИКЕР-КОНКУРС!",
             description=f"**Приз:** {self.prize.value}\n\n"
@@ -733,7 +868,7 @@ class ClickerTopModal(Modal, title="🎮 Создание кликер-конк�
         embed.timestamp = end_time
         
         view = ClickerView(clicker_id)
-        await interaction.response.send_message(embed=embed, view=view)
+        await interaction.channel.send(embed=embed, view=view)
         
         asyncio.create_task(end_top_clicker(clicker_id, end_time))
 
@@ -1116,43 +1251,49 @@ class GiveawayModal(discord.ui.Modal, title="🎁 Создание розыгр�
 
 
 # ================== ИГРА УГАДАЙ ЧИСЛО ==================
-class GuessNumberGame:
-    def __init__(self, channel_id: int, target_number: int, prize: str):
-        self.channel_id = channel_id
-        self.target_number = target_number
-        self.prize = prize
-        self.active = True
-        self.winner = None
-        self.start_time = datetime.now()
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
     
-    async def check_guess(self, message: discord.Message):
-        if not self.active:
-            return False
-        
-        try:
-            guess = int(message.content.strip())
-            if guess == self.target_number:
-                self.active = False
-                self.winner = message.author.id
-                
-                winner_channel = bot.get_channel(WINNER_CHANNEL_ID)
-                if winner_channel:
-                    await winner_channel.send(
-                        f"🎉 **УГАДАЙ ЧИСЛО — ПОБЕДИТЕЛЬ!** 🎉\n\n"
-                        f"**Правильное число:** {self.target_number}\n"
-                        f"**Победитель:** {message.author.mention}\n"
-                        f"**Приз:** {self.prize}\n\n"
-                        f"Поздравляем!"
+    if message.channel.id == GUESS_CHANNEL_ID:
+        game = active_guess_games.get(GUESS_CHANNEL_ID)
+        if game and game.get("active", False):
+            try:
+                guess = int(message.content.strip())
+                if guess == game["target"]:
+                    game["active"] = False
+                    game["winner"] = message.author.id
+                    
+                    winner_channel = bot.get_channel(WINNER_CHANNEL_ID)
+                    if winner_channel:
+                        await winner_channel.send(
+                            f"🎉 **УГАДАЙ ЧИСЛО — ПОБЕДИТЕЛЬ!** 🎉\n\n"
+                            f"**Правильное число:** {game['target']}\n"
+                            f"**Победитель:** {message.author.mention}\n"
+                            f"**Приз:** {game['prize']}\n\n"
+                            f"Поздравляем!"
+                        )
+                    
+                    await message.channel.send(
+                        f"🎉 **{message.author.mention} угадал число {game['target']}!** 🎉\n"
+                        f"Игра завершена! Победитель получит: {game['prize']}"
                     )
-                
-                await message.channel.send(
-                    f"🎉 **{message.author.mention} угадал число {self.target_number}!** 🎉\n"
-                    f"Игра завершена! Победитель получит: {self.prize}"
-                )
-                return True
-        except ValueError:
-            pass
-        return False
+                    del active_guess_games[GUESS_CHANNEL_ID]
+            except ValueError:
+                pass
+    
+    async with aiosqlite.connect("db.sqlite3") as db:
+        await db.execute("""
+        INSERT INTO user_stats (user_id, messages, last_active)
+        VALUES (?, 1, datetime('now'))
+        ON CONFLICT(user_id) DO UPDATE SET 
+            messages = messages + 1,
+            last_active = datetime('now')
+        """, (message.author.id,))
+        await db.commit()
+    
+    await bot.process_commands(message)
 
 
 # ================== МАГАЗИН ==================
@@ -1277,7 +1418,8 @@ async def help_command(interaction: discord.Interaction):
             "`/top` - Топ 10 инвайтеров\n"
             "`/server` - Статистика сервера\n"
             "`/tag` - Проверить наличие тега и получить роль\n"
-            "`/mptime` - Посмотреть все запланированные конкурсы"
+            "`/mptime` - Посмотреть все запланированные конкурсы\n"
+            "`/toss` - Сыграть в Орёл/Решка (ставка 1 инвайт)"
         ),
         inline=False
     )
@@ -1289,7 +1431,7 @@ async def help_command(interaction: discord.Interaction):
             "`/gend <message_id>` - Завершить розыгрыш\n"
             "`/greroll <message_id>` - Перевыбрать победителей\n"
             "`/gdelete <message_id>` - Удалить розыгрыш\n"
-            "`/gmp <приз>` - Запустить игру 'Угадай число'\n"
+            "`/gmp` - Запустить игру 'Угадай число'\n"
             "`/gclicktop` - Создать кликер-конкурс\n"
             "`/setgmptime` - Запланировать 'Угадай число' на время (МСК)\n"
             "`/setgclicktoptime` - Запланировать кликер-конкурс на время (МСК)"
@@ -1324,14 +1466,14 @@ async def help_command(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed)
 
-# ================== КОМАНДА /AGIT (РАССЫЛКА В ЛС) ==================
+
+# ================== КОМАНДА /AGIT ==================
 @bot.tree.command(name="agit", description="📢 Отправить новость всем игрокам в личные сообщения (только админы)")
 async def agit_command(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
         return
     
-    # Создаем модальное окно прямо здесь, без отдельного класса
     class AgitModal(Modal, title="📢 Рассылка новости всем игрокам"):
         message = TextInput(
             label="📝 Текст новости",
@@ -1360,9 +1502,9 @@ async def agit_command(interaction: discord.Interaction):
                 try:
                     await member.send(embed=embed)
                     success_count += 1
-                    await asyncio.sleep(0.3)  # Защита от rate limit
+                    await asyncio.sleep(0.3)
                 except discord.Forbidden:
-                    fail_count += 1  # Пользователь закрыл ЛС
+                    fail_count += 1
                 except Exception as e:
                     fail_count += 1
                     print(f"Ошибка отправки {member.name}: {e}")
@@ -1381,6 +1523,7 @@ async def agit_command(interaction: discord.Interaction):
     
     modal = AgitModal()
     await interaction.response.send_modal(modal)
+
 
 # ================== КОМАНДА /BAN ==================
 @bot.tree.command(name="ban", description="🔨 Забанить пользователя (навсегда или на время)")
@@ -1434,7 +1577,6 @@ async def ban_command(interaction: discord.Interaction, user: discord.Member, re
             """, (user.id, reason, ban_end.isoformat() if ban_end else None, interaction.user.id))
             await db.commit()
         
-        # Отправка в ЛС пользователю
         try:
             embed_dm = discord.Embed(
                 title="🔨 **ВЫ ЗАБАНЕНЫ НА СЕРВЕРЕ**",
@@ -1462,7 +1604,6 @@ async def ban_command(interaction: discord.Interaction, user: discord.Member, re
         if log_channel:
             await log_channel.send(f"🔨 {interaction.user.name} забанил {user.name} | Причина: {reason} | Срок: {duration_text}")
         
-        # Если бан временный - планируем разбан
         if ban_end:
             asyncio.create_task(auto_unban(user.id, ban_end, interaction.guild.id, reason))
             
@@ -1507,10 +1648,10 @@ async def auto_unban(user_id: int, unban_time: datetime, guild_id: int, reason: 
         pass
 
 
-# ================== КОМАНДА /SETGMPTIME (ЗАПЛАНИРОВАТЬ УГАДАЙ ЧИСЛО) ==================
+# ================== КОМАНДА /SETGMPTIME ==================
 class SetGmpTimeModal(Modal, title="📅 Запланировать игру 'Угадай число'"):
     time_input = TextInput(
-        label="⏰ Время (МСК, формат: ДД.ММ ГГ:ММ)",
+        label="⏰ Время (МСК, формат: ДД.ММ ЧЧ:ММ)",
         placeholder="Например: 25.12 15:30",
         required=True,
         max_length=20
@@ -1520,6 +1661,12 @@ class SetGmpTimeModal(Modal, title="📅 Запланировать игру 'У
         placeholder="Что выиграет победитель?",
         required=True,
         max_length=200
+    )
+    target_number = TextInput(
+        label="🔢 ЗАГАДАННОЕ ЧИСЛО (1-100)",
+        placeholder="Оставьте пустым для случайного числа",
+        required=False,
+        max_length=3
     )
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -1532,7 +1679,6 @@ class SetGmpTimeModal(Modal, title="📅 Запланировать игру 'У
             return
         
         try:
-            # Парсим время: ДД.ММ ЧЧ:ММ
             parts = self.time_input.value.split()
             if len(parts) != 2:
                 raise ValueError
@@ -1553,16 +1699,21 @@ class SetGmpTimeModal(Modal, title="📅 Запланировать игру 'У
             
             game_time = datetime(year, month, day, hour, minute)
             
-            # Если время уже прошло в этом году - переносим на следующий год
             if game_time < now:
                 game_time = datetime(year + 1, month, day, hour, minute)
             
-            # Проверяем, что время не слишком далеко (максимум 30 дней)
             if (game_time - now).days > 30:
                 await interaction.response.send_message("❌ Нельзя планировать игру более чем на 30 дней вперёд!", ephemeral=True)
                 return
             
-            game_id = await save_scheduled_game("guess", game_time, self.prize.value, interaction.user.id, interaction.user.display_name)
+            target_number = None
+            if self.target_number.value:
+                target_number = int(self.target_number.value)
+                if target_number < 1 or target_number > 100:
+                    await interaction.response.send_message("❌ Число должно быть от 1 до 100!", ephemeral=True)
+                    return
+            
+            game_id = await save_scheduled_game("guess", game_time, self.prize.value, interaction.user.id, interaction.user.display_name, target_number)
             
             scheduled_games.append({
                 "id": game_id,
@@ -1570,15 +1721,17 @@ class SetGmpTimeModal(Modal, title="📅 Запланировать игру 'У
                 "time": game_time,
                 "prize": self.prize.value,
                 "creator_id": interaction.user.id,
-                "creator_name": interaction.user.display_name
+                "creator_name": interaction.user.display_name,
+                "target_number": target_number
             })
             
-            # Сортируем по времени
             scheduled_games.sort(key=lambda x: x["time"])
+            
+            target_text = f" (загадано число: {target_number})" if target_number else " (число выбрано случайно)"
             
             embed = discord.Embed(
                 title="✅ Игра запланирована!",
-                description=f"**Тип:** Угадай число\n"
+                description=f"**Тип:** Угадай число{target_text}\n"
                            f"**Приз:** {self.prize.value}\n"
                            f"**Время:** {game_time.strftime('%d.%m.%Y в %H:%M')} МСК\n\n"
                            f"Игра автоматически запустится в указанное время в канале <#{GUESS_CHANNEL_ID}>",
@@ -1604,10 +1757,10 @@ async def setgmptime_command(interaction: discord.Interaction):
     await interaction.response.send_modal(modal)
 
 
-# ================== КОМАНДА /SETGCLICKTOPTIME (ЗАПЛАНИРОВАТЬ КЛИКЕР) ==================
+# ================== КОМАНДА /SETGCLICKTOPTIME ==================
 class SetGclickTopTimeModal(Modal, title="📅 Запланировать кликер-конкурс"):
     time_input = TextInput(
-        label="⏰ Время (МСК, формат: ДД.ММ ГГ:ММ)",
+        label="⏰ Время (МСК, формат: ДД.ММ ЧЧ:ММ)",
         placeholder="Например: 25.12 15:30",
         required=True,
         max_length=20
@@ -1635,7 +1788,6 @@ class SetGclickTopTimeModal(Modal, title="📅 Запланировать кли
             return
         
         try:
-            # Парсим время
             parts = self.time_input.value.split()
             if len(parts) != 2:
                 raise ValueError
@@ -1709,7 +1861,7 @@ async def setgclicktoptime_command(interaction: discord.Interaction):
     await interaction.response.send_modal(modal)
 
 
-# ================== КОМАНДА /MPTIME (ПОКАЗАТЬ ОЧЕРЕДЬ) ==================
+# ================== КОМАНДА /MPTIME ==================
 @bot.tree.command(name="mptime", description="📅 Показать все запланированные конкурсы")
 async def mptime_command(interaction: discord.Interaction):
     if not scheduled_games:
@@ -1736,9 +1888,13 @@ async def mptime_command(interaction: discord.Interaction):
         game_time = game["time"]
         time_str = game_time.strftime("%d.%m.%Y в %H:%M МСК")
         
+        extra_info = ""
+        if game["type"] == "guess" and game.get("target_number"):
+            extra_info = f"\n**Загадано число:** {game['target_number']}"
+        
         embed.add_field(
             name=f"{i}. {type_names.get(game['type'], game['type'])}",
-            value=f"**Приз:** {game['prize']}\n"
+            value=f"**Приз:** {game['prize']}{extra_info}\n"
                   f"**Время:** {time_str}\n"
                   f"**Создал:** {game['creator_name']}",
             inline=False
@@ -1746,6 +1902,75 @@ async def mptime_command(interaction: discord.Interaction):
     
     embed.set_footer(text=f"Конкурсы проходят в канале <#{GUESS_CHANNEL_ID}> | Всего мест в очереди: 5")
     await interaction.response.send_message(embed=embed)
+
+
+# ================== КОМАНДА /GMP ==================
+class GmpModal(Modal, title="🎲 Запустить игру 'Угадай число'"):
+    prize = TextInput(
+        label="🎁 ПРИЗ",
+        placeholder="Что выигрывает победитель?",
+        required=True,
+        max_length=200
+    )
+    target_number = TextInput(
+        label="🔢 ЗАГАДАННОЕ ЧИСЛО (1-100)",
+        placeholder="Оставьте пустым для случайного числа",
+        required=False,
+        max_length=3
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not has_permission(interaction):
+            await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+            return
+        
+        target_number = None
+        if self.target_number.value:
+            try:
+                target_number = int(self.target_number.value)
+                if target_number < 1 or target_number > 100:
+                    await interaction.response.send_message("❌ Число должно быть от 1 до 100!", ephemeral=True)
+                    return
+            except ValueError:
+                await interaction.response.send_message("❌ Введите корректное число от 1 до 100!", ephemeral=True)
+                return
+        
+        if target_number is None:
+            target_number = random.randint(1, 100)
+        
+        await interaction.response.send_message(f"<@&{VERIFY_ROLE_ID}> 🎲 **ВНИМАНИЕ! НАЧИНАЕТСЯ ИГРА 'УГАДАЙ ЧИСЛО'!**")
+        
+        embed = discord.Embed(
+            title="🎲 **УГАДАЙ ЧИСЛО** 🎲",
+            description=(
+                f"**Ваша задача отгадать число от 1 до 100.**\n\n"
+                f"**Приз:** {self.prize.value}\n\n"
+                f"**Ответ отправьте в этот канал**"
+            ),
+            color=discord.Color.purple()
+        )
+        embed.set_footer(text=f"Игра создана: {interaction.user.display_name}")
+        
+        await interaction.channel.send(embed=embed)
+        
+        active_guess_games[GUESS_CHANNEL_ID] = {
+            "target": target_number,
+            "prize": self.prize.value,
+            "active": True,
+            "winner": None,
+            "start_time": datetime.now(),
+            "creator_name": interaction.user.display_name
+        }
+
+
+@bot.tree.command(name="gmp", description="🎲 Запустить игру 'Угадай число'")
+async def slash_gmp(interaction: discord.Interaction):
+    if not has_permission(interaction):
+        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
+        return
+    
+    modal = GmpModal()
+    await interaction.response.send_modal(modal)
 
 
 # ================== ОСТАЛЬНЫЕ КОМАНДЫ ==================
@@ -2270,33 +2495,6 @@ async def slash_greroll(interaction: discord.Interaction, message_id: str):
         await interaction.response.send_message("😞 Не удалось выбрать победителей", ephemeral=True)
 
 
-@bot.tree.command(name="gmp", description="🎲 Запустить игру 'Угадай число'")
-@app_commands.describe(prize="Приз для победителя")
-async def slash_gmp(interaction: discord.Interaction, prize: str):
-    if not has_permission(interaction):
-        await interaction.response.send_message("❌ У вас нет прав!", ephemeral=True)
-        return
-    
-    target_number = random.randint(1, 100)
-    
-    embed = discord.Embed(
-        title="🎲 **УГАДАЙ ЧИСЛО** 🎲",
-        description=(
-            f"**Ваша задача отгадать число от 1 до 100.**\n\n"
-            f"**Приз:** {prize}\n\n"
-            f"**Ответ отправьте в этот канал**\n"
-            f"<@&{GAME_ANNOUNCE_ROLE_ID}>"
-        ),
-        color=discord.Color.purple()
-    )
-    
-    await interaction.response.send_message(embed=embed)
-    
-    active_guess_games[GUESS_CHANNEL_ID] = GuessNumberGame(
-        GUESS_CHANNEL_ID, target_number, prize
-    )
-
-
 @bot.tree.command(name="sync", description="Синхронизировать команды (только для админов)")
 async def sync_commands(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.administrator:
@@ -2344,32 +2542,9 @@ async def on_ready():
             print(f"❌ Ошибка загрузки инвайтов: {e}")
 
     print(f"✅ Бот запущен: {bot.user}")
-    await bot.change_presence(activity=discord.Game(name="/help | /shop | /gcreate | /gclicktop | /createmenu | /tag | /mptime"))
+    await bot.change_presence(activity=discord.Game(name="/help | /shop | /gcreate | /gclicktop | /createmenu | /tag | /mptime | /toss"))
     
     asyncio.create_task(check_scheduled_games())
-
-
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        return
-    
-    if message.channel.id == GUESS_CHANNEL_ID:
-        game = active_guess_games.get(GUESS_CHANNEL_ID)
-        if game and game.active:
-            await game.check_guess(message)
-    
-    async with aiosqlite.connect("db.sqlite3") as db:
-        await db.execute("""
-        INSERT INTO user_stats (user_id, messages, last_active)
-        VALUES (?, 1, datetime('now'))
-        ON CONFLICT(user_id) DO UPDATE SET 
-            messages = messages + 1,
-            last_active = datetime('now')
-        """, (message.author.id,))
-        await db.commit()
-    
-    await bot.process_commands(message)
 
 
 @bot.event
