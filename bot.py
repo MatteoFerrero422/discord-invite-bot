@@ -2693,9 +2693,30 @@ async def on_member_update(before: discord.Member, after: discord.Member):
 # ================== ЗАПУСК ==================
 if __name__ == "__main__":
     try:
+        print("🚀 Запуск бота...")
+        
+        # Проверка токена
+        if not TOKEN:
+            print("❌ ТОКЕН НЕ НАЙДЕН!")
+            print("Убедитесь, что вы установили переменную окружения TOKEN")
+            exit(1)
+        
+        print(f"✅ Токен найден (длина: {len(TOKEN)} символов)")
+        
+        # Запуск веб-сервера в отдельном потоке
         keep_alive()
+        
+        # Запуск бота
+        print("🤖 Подключение к Discord API...")
         bot.run(TOKEN)
-    except discord.LoginFailure:
-        print("❌ Ошибка: Неверный токен бота!")
+        
+    except discord.LoginFailure as e:
+        print(f"❌ Ошибка авторизации: {e}")
+        print("Проверьте правильность токена!")
+    except discord.PrivilegedIntentsRequired as e:
+        print(f"❌ Ошибка интентов: {e}")
+        print("Включите Privileged Intents в Discord Developer Portal!")
     except Exception as e:
         print(f"❌ Ошибка запуска: {e}")
+        import traceback
+        traceback.print_exc()
